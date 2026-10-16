@@ -1,0 +1,49 @@
+# ===========================================================================
+# LAYER 6, part two — deny by default, at L7, on verified identity.
+#
+# An AuthorizationPolicy with an EMPTY spec is the deny-all. That is not
+# obvious and it is not a trick: the default action is ALLOW, the rule list is
+# empty, so no request matches any rule and every request is refused. There is
+# no DENY-everything verb, in the same way NetworkPolicy has no deny verb.
+#
+# It is easy to write this wrong in a way that does nothing. All of these are
+# syntactically valid and none of them denies anything:
+#
+#   spec:
+#     action: ALLOW
+#     rules:
+#       - {}            # one rule matching everything → allows everything
+#
+#   spec:
+#     action: DENY
+#     rules: []         # DENY with no rules → matches nothing → denies nothing
+#
+# The second is the dangerous one: it reads as "deny, with nothing excepted"
+# and means the opposite. `istioctl analyze` does not flag it, because it is
+# legal. Only a request that should fail and does not will tell you.
+# ===========================================================================
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: zt-prod
+  annotations:
+    note: >-
+      Empty spec is intentional and is the documented deny-all form. Do not
+      "fix" this by adding action or rules - see the comment above the
+      resource.
+spec: {}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: zt-attack
+spec: {}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: zt-psa-off
+spec: {}

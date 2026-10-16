@@ -1,0 +1,43 @@
+# ATTACK 1 — an unsigned image. Everything else about this pod is compliant.
+#
+#   kubectl apply -f . --dry-run=server
+#
+# zt-unsigned-control is published by the supply-chain-app CI on every run,
+# deliberately WITHOUT a signature, by a job that has no id-token permission
+# and therefore cannot sign even by accident.
+#
+# It is a NEGATIVE CONTROL, not an arbitrary bad image. Same registry, same
+# owner, same Dockerfile, same pipeline, matched by the same Kyverno glob
+# (ghcr.io/syed-amjad/zt-*). The only difference is the signature. Reaching
+# for nginx:latest instead would be refused by the REGISTRY allowlist first,
+# and the signature policy would never be consulted.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attack-01-unsigned
+  namespace: zt-prod
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+    runAsNonRoot: true
+    runAsUser: 10001
+  containers:
+    - name: c
+      # NOTE: a TAG, not a digest — which this pod would also be refused for,
+      # by verifyDigest: true in the same policy. That is not sloppiness: the
+      # control image is published by tag because it is a fixture, and a
+      # rejection for either reason is a correct rejection. attack-01 reads
+      # the message to see which rule spoke.
+      image: ghcr.io/syed-amjad/zt-unsigned-control:latest
+      command: ["sleep", "60"]
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {memory: 64Mi}

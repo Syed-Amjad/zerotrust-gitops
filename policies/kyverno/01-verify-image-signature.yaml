@@ -1,0 +1,184 @@
+# ===========================================================================
+# LAYER 3, the policy the whole project is built around.
+#
+# Admission requires a signature from a SPECIFIC CI workflow, in a SPECIFIC
+# repository, on a SPECIFIC branch, verified against the Sigstore transparency
+# log. That is a stronger claim than "the image is signed", and the difference
+# is the point:
+#
+#   "signed"                  anyone with a Sigstore account can sign anything
+#   "signed by this builder"  an attacker needs the build workflow identity
+#
+# Compromising the registry alone is therefore not enough. An attacker who
+# steals a GHCR token can push any bytes they like under our name, and the
+# kubelet will never be asked to pull them, because no Fulcio certificate
+# naming this workflow exists for that digest.
+# ===========================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signature
+  annotations:
+    policies.kyverno.io/title: Verify keyless image signature
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/subject: Pod
+spec:
+  # -------------------------------------------------------------------------
+  # SHIPS IN AUDIT. Flip with ./scripts/policy-mode.sh enforce.
+  #
+  # "Audit before Enforce" is a stated design decision, not caution. A
+  # signature policy switched straight to Enforce on a cluster with running
+  # workloads rejects every pod that restarts for any reason — a node drain, an
+  # eviction, an OOM kill — and the outage looks like a cluster fault rather
+  # than a policy rollout. In Audit the same policy writes a report instead:
+  #
+  #   kubectl get polr -A
+  #
+  # Enforce is a separate, deliberate step in BUILD-STEPS.md, taken after the
+  # reports come back clean.
+  # -------------------------------------------------------------------------
+  validationFailureAction: Audit
+
+  # -------------------------------------------------------------------------
+  # 30s, the maximum Kubernetes allows, and the default of 10 is not enough.
+  #
+  # Verification is not a local computation. At admission time Kyverno fetches
+  # the signature from ghcr.io, the certificate chain from Fulcio and the
+  # inclusion proof from rekor.sigstore.dev. On a cold cache from a single
+  # t3.large that has exceeded 10 seconds, and the failure is reported as:
+  #
+  #   Internal error occurred: failed calling webhook
+  #   "mutate.kyverno.svc-fail": context deadline exceeded
+  #
+  # which names Kyverno and says nothing about Sigstore, so it reads like
+  # Kyverno being unhealthy rather than a slow network call Kyverno is making.
+  # -------------------------------------------------------------------------
+  webhookTimeoutSeconds: 30
+
+  # -------------------------------------------------------------------------
+  # failurePolicy: Fail — if Kyverno cannot be reached, the request is DENIED.
+  #
+  # The trade-off, stated plainly because it is real: a broken Kyverno becomes
+  # a cluster that cannot schedule pods in these namespaces. The alternative,
+  # Ignore, means an attacker who can crash or network-partition the admission
+  # controller has also disabled every policy here — which turns the control
+  # set into something you can switch off by causing an outage.
+  #
+  # For a cluster enforcing supply-chain provenance, Fail is the only
+  # defensible setting. The operational cost is a reason to run the admission
+  # controller properly, not a reason to weaken it.
+  # -------------------------------------------------------------------------
+  failurePolicy: Fail
+
+  # -------------------------------------------------------------------------
+  # background: false is REQUIRED, not a tuning choice.
+  #
+  # Background scans re-evaluate existing resources on a timer, with no
+  # AdmissionRequest and no registry credentials in scope. Image verification
+  # needs both. Left at the default, Kyverno rejects the policy itself:
+  #
+  #   spec.rules[0]: verifyImages rules are not supported in background mode
+  #
+  # The consequence is worth knowing: this policy only ever evaluates at
+  # admission. Pods already running when it is applied are never revisited, so
+  # applying it to a live cluster takes effect at the next pod restart.
+  # -------------------------------------------------------------------------
+  background: false
+
+  rules:
+    - name: verify-ghcr-signature
+      match:
+        any:
+          - resources:
+              # -----------------------------------------------------------
+              # Pods ONLY, not Deployments. The subtlest decision in the file.
+              #
+              # Matching the controller gives a nicer error, because the
+              # rejection comes back on `kubectl apply` rather than appearing
+              # later as a ReplicaSet event. But a verifyImages rule matching a
+              # controller makes Kyverno a mutating plugin for that controller
+              # pod template, and ArgoCD then sees the live Deployment differ
+              # from git, reports OutOfSync permanently, and with selfHeal on
+              # fights Kyverno in a loop neither side wins.
+              #
+              # The cost of matching Pods: a Deployment carrying an unsigned
+              # image is ACCEPTED, and its pods are then rejected one by one.
+              # You get a Deployment stuck at 0 replicas, with the real reason
+              # in the ReplicaSet events:
+              #
+              #   kubectl -n zt-prod describe rs <name>
+              #
+              # attack-01 reads those events rather than the apply output, for
+              # exactly this reason.
+              # -----------------------------------------------------------
+              kinds:
+                - Pod
+              namespaces:
+                - zt-prod
+                - zt-attack
+                - zt-psa-off
+
+      verifyImages:
+        # Scoped to our own published images. The Istio sidecar comes from
+        # docker.io and is not signed by this workflow, so a glob wide enough
+        # to include it would reject every injected pod in the mesh.
+        # Third-party images are governed by the registry allowlist in policy
+        # 03 instead — a different control for a different trust relationship.
+        - imageReferences:
+            - "ghcr.io/syed-amjad/zt-*"
+
+          # No signature found is a FAILURE, not a skip. Left at the default,
+          # an image with no signature at all passes, and the policy only
+          # catches images with a WRONG signature — close to the opposite of
+          # what it is for.
+          required: true
+
+          # mutateDigest: false — the manifests in workloads/ already carry
+          # digests, written there by CI. Letting Kyverno resolve tags to
+          # digests would hide a manifest that had drifted back to a tag, and
+          # would mean the digest that got verified was chosen at admission
+          # time rather than reviewed in a pull request.
+          mutateDigest: false
+
+          # verifyDigest: true — REJECT any image in this glob referenced by
+          # tag. A second control riding along, and a valuable one: it makes
+          # "deployed by tag" unrepresentable rather than merely discouraged.
+          verifyDigest: true
+
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    # ---------------------------------------------------
+                    # The exact identity, not a pattern.
+                    #
+                    # This string is the Fulcio certificate SAN, and it names
+                    # repository, workflow file and branch. Loosening any part
+                    # of it loosens the claim:
+                    #
+                    #   drop the branch    any branch of this repo can sign,
+                    #                      including one a contributor opened
+                    #   drop the workflow  any workflow in this repo can sign
+                    #   drop the repo      any repository on GitHub can sign
+                    #
+                    # Change it if the repository or the workflow file is
+                    # renamed. A mismatch is reported as "no matching
+                    # signatures", which sounds like a MISSING signature
+                    # rather than a REJECTED one — check this subject before
+                    # concluding the signing step failed.
+                    #
+                    # Hardening available but not used here: Fulcio records
+                    # GitHub-specific OIDC claims, which `additionalExtensions`
+                    # can match to pin the repository owner ID rather than its
+                    # name. Names can be transferred between accounts;
+                    # numeric ids cannot.
+                    # ---------------------------------------------------
+                    subject: "https://github.com/Syed-Amjad/supply-chain-app/.github/workflows/build-sign.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      # The public transparency log. Verification checks the
+                      # signature was logged, which is what makes a
+                      # retroactively forged signature detectable: an attacker
+                      # cannot insert an entry dated before the compromise.
+                      url: https://rekor.sigstore.dev

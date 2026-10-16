@@ -1,0 +1,62 @@
+# ===========================================================================
+# THE ONLY `kubectl apply` IN THE WHOLE PROJECT, after the install scripts.
+#
+# App-of-apps: this Application's content is the five Applications in
+# argocd/applications/, so applying it hands the rest of the cluster to
+# ArgoCD. From here on, every change to what runs is a commit.
+#
+#   kubectl apply -f argocd/projects/zerotrust.yaml
+#   kubectl apply -f argocd/root-app.yaml
+#
+# The project must exist first. An Application referencing a project that is
+# not there is rejected, and the message — "Application referencing project
+# zerotrust which does not exist" — is clear, which is unusual enough to be
+# worth noting.
+# ===========================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: zerotrust
+  source:
+    repoURL: https://github.com/Syed-Amjad/zerotrust-gitops
+    targetRevision: main
+    # Only the Application manifests. Pointing this at the repository root
+    # would make ArgoCD try to apply every manifest in it directly — the
+    # policies, the network rules, the Falco values, the terraform directory —
+    # bypassing the waves entirely and landing the workloads at the same
+    # moment as the controls that are supposed to govern them.
+    path: argocd/applications
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+      # -------------------------------------------------------------------
+      # Retry is set on the ROOT only, on purpose.
+      #
+      # The child Applications have no retry block. The previous project found
+      # out why that matters: ArgoCD does not retry a failed revision on
+      # auto-sync, so a child Application whose manifests are invalid sits in
+      # a failed state until the revision changes — which is the correct
+      # behaviour, because retrying a manifest that cannot validate just
+      # produces the same error on a schedule.
+      #
+      # The root is different: its failures are transient (the repo server
+      # starting, the API server briefly unavailable during k3s startup), so a
+      # bounded backoff is worth having there.
+      # -------------------------------------------------------------------

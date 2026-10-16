@@ -1,0 +1,101 @@
+# ===========================================================================
+# THE RULE THAT MAKES DEFAULT-DENY SURVIVABLE.
+#
+# Apply 00-default-deny.yaml without this one and nothing resolves. The symptom
+# is never "DNS is blocked" — it is:
+#
+#   httpx.ConnectError: [Errno -3] Temporary failure in name resolution
+#   Readiness probe failed: Get "http://10.42.0.31:8000/health": dial tcp
+#     lookup api.zt-prod.svc.cluster.local: i/o timeout
+#
+# Both of which read like the upstream being down. Every service in the
+# namespace fails at once, which looks like a cluster fault, and the thing that
+# changed was a policy that mentions neither DNS nor any of the services that
+# broke.
+#
+# It is the single most common way a first default-deny rollout gets reverted
+# within the hour, and the reason this project rolls policy out in Audit first.
+# ===========================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: zt-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              # k3s runs CoreDNS with this label. Verify before assuming:
+              #   kubectl -n kube-system get pods --show-labels | grep dns
+              # A managed cluster may use a different label, and a selector
+              # that matches no pods produces a policy that allows nothing
+              # while looking entirely correct.
+              k8s-app: kube-dns
+      ports:
+        # BOTH protocols. UDP is the normal path; TCP is used when a response
+        # exceeds 512 bytes or is truncated, and for zone transfers. Allowing
+        # only UDP produces DNS that works for most names and fails for a few,
+        # intermittently — which is far harder to diagnose than no DNS at all.
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: zt-attack
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# The attacker workloads get DNS too, deliberately.
+#
+# Denying them name resolution would stop the exfiltration attempt in attack 5
+# for an uninteresting reason, and the result would prove nothing about the
+# egress allowlist being tested. An attack that fails at the wrong layer is a
+# test that passes for the wrong reason.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: zt-psa-off
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

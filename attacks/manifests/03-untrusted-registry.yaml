@@ -1,0 +1,34 @@
+# ATTACK 3 — an image from a registry nobody declared.
+#
+# nginx is a real, popular, well-maintained image, chosen precisely because
+# there is nothing wrong with it. The policy is not a judgement about nginx; it
+# is a statement that this cluster runs artifacts from two places and this is
+# not one of them. A fixture using something obviously malicious would make
+# the control look like malware detection, which it is not.
+#
+# Pinned by digest so this pod fails the REGISTRY rule and nothing else. A tag
+# here would also trip verifyDigest and the result would be ambiguous.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attack-03-untrusted-registry
+  namespace: zt-prod
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+    runAsNonRoot: true
+    runAsUser: 10001
+  containers:
+    - name: c
+      image: docker.io/library/nginx@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {memory: 64Mi}

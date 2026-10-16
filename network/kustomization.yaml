@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Wave 2, and the ORDER WITHIN THE FILE IS NOT THE ORDER OF APPLICATION.
+#
+# Kustomize emits these in sequence, but Kubernetes applies them as a set and
+# NetworkPolicies are additive: a flow is permitted if ANY policy allows it. So
+# there is no window in which default-deny is in force and the DNS allowance is
+# not — provided they arrive in the SAME sync.
+#
+# Which is exactly why they are one ArgoCD Application and not five. Split
+# across waves, 00-default-deny would land first and the namespace would lose
+# DNS until the next wave completed. That gap is seconds long and it is enough
+# to fail every readiness probe in the namespace and start a crash-loop that
+# outlives the cause.
+resources:
+  - 00-default-deny.yaml
+  - 01-allow-dns.yaml
+  - 02-allow-web-to-api.yaml
+  - 03-allow-istio-control-plane.yaml
+  - 04-allow-https-egress.yaml

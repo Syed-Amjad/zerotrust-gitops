@@ -1,0 +1,124 @@
+# ===========================================================================
+# LAYER 2 — restricting what the GitOps path is permitted to do.
+#
+# ArgoCD runs with cluster-admin. That is not a misconfiguration; it is what
+# lets it reconcile arbitrary declared state. The consequence is that whoever
+# can merge to this repository can create anything in the cluster, including a
+# ClusterRoleBinding granting themselves cluster-admin directly.
+#
+# An AppProject is the boundary that makes the GitOps path narrower than the
+# credentials behind it. Everything below is an allowlist, and anything absent
+# is refused at sync time with a message naming the resource — which is how a
+# pull request that quietly widens the blast radius becomes a failed sync
+# rather than a successful one.
+# ===========================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: zerotrust
+  namespace: argocd
+spec:
+  description: Zero-trust supply chain platform. Policy and workloads only.
+
+  # -------------------------------------------------------------------------
+  # Exactly one repository. Not a wildcard.
+  #
+  # The previous project widened this twice during a build, each time after a
+  # sync failed with "application repo ... is not permitted in project". The
+  # lesson was not "make it wider" — it was that the list has to include every
+  # spelling ArgoCD might resolve, because it is compared as a STRING and not
+  # as a URL. `https://github.com/x/y` and `https://github.com/x/y.git` are
+  # different entries.
+  # -------------------------------------------------------------------------
+  sourceRepos:
+    - https://github.com/Syed-Amjad/zerotrust-gitops
+    - https://github.com/Syed-Amjad/zerotrust-gitops.git
+
+  # -------------------------------------------------------------------------
+  # Where this project may deploy. istio-system and kube-system are NOT here.
+  #
+  # That is deliberate and it is the main thing this boundary buys. A pull
+  # request to this repository cannot modify the mesh control plane, the
+  # admission controller or CoreDNS — so the GitOps path cannot be used to
+  # disable the layers that are policing it. Those components are installed by
+  # scripts, out of band, by someone with SSH to the box.
+  # -------------------------------------------------------------------------
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: zt-prod
+    - server: https://kubernetes.default.svc
+      namespace: zt-attack
+    - server: https://kubernetes.default.svc
+      namespace: zt-psa-off
+    # argocd itself, because the root Application creates the child
+    # Applications and those are objects in this namespace.
+    - server: https://kubernetes.default.svc
+      namespace: argocd
+
+  # -------------------------------------------------------------------------
+  # Cluster-scoped resources, enumerated. Short by design.
+  #
+  # Namespace     — the three namespaces and their PSA labels (wave 0)
+  # ClusterPolicy — the Kyverno policies (wave 1)
+  #
+  # Nothing else. In particular NOT ClusterRole, ClusterRoleBinding,
+  # CustomResourceDefinition, ValidatingWebhookConfiguration or
+  # MutatingWebhookConfiguration — all of which the previous project's
+  # AppProject had to allow, because it was deploying Helm charts that create
+  # them. Here the charts are installed by script, so the GitOps path never
+  # needs permission to define a webhook or grant a role. A supply-chain
+  # project in which the delivery path can register its own admission webhook
+  # has a gap you could drive through.
+  # -------------------------------------------------------------------------
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: kyverno.io
+      kind: ClusterPolicy
+
+  # -------------------------------------------------------------------------
+  # Namespaced resources: allow all, within the destinations above.
+  #
+  # Stated as a trade-off rather than left to look like an oversight. A
+  # whitelist here would be stricter, and it would need Deployment, Service,
+  # ServiceAccount, NetworkPolicy, PeerAuthentication, AuthorizationPolicy,
+  # ServiceEntry, Sidecar, Gateway and VirtualService — ten entries that have
+  # to be edited every time the architecture gains a resource type, where the
+  # failure mode is a sync error during a change you are already making.
+  #
+  # The destinations list already confines everything to three namespaces that
+  # contain nothing but this project. Within that scope, "any namespaced
+  # resource" is a much smaller grant than it sounds.
+  # -------------------------------------------------------------------------
+  namespaceResourceBlacklist: []
+
+  # -------------------------------------------------------------------------
+  # GPG-SIGNED COMMITS — the second half of layer 2, and NOT enabled here.
+  #
+  # Uncommenting this requires the matching public key to be present in
+  # ArgoCD, and then every commit at the target revision of every Application
+  # in this project must carry a valid signature from one of these key ids. An
+  # unsigned commit fails to sync with:
+  #
+  #   target revision <sha> is not signed
+  #
+  # scripts/05-enable-commit-signing.sh does the whole thing: generates a key,
+  # configures git to sign, imports the public half into ArgoCD and patches
+  # this field. It is a separate, optional step because it changes how you
+  # commit for the rest of the project, and because getting locked out of your
+  # own GitOps repo at 11pm is a bad way to learn how it works.
+  #
+  # Known limitation worth stating: ArgoCD cannot verify signatures on Helm
+  # chart sources, only git. It happens to not matter here — every Application
+  # in this repo has a git source — and that is partly why the Helm-installed
+  # components were kept out of ArgoCD.
+  # -------------------------------------------------------------------------
+  # signatureKeys:
+  #   - keyID: REPLACE_WITH_GPG_KEY_ID
+
+  orphanedResources:
+    # Warn about resources in these namespaces that no Application claims.
+    # In a project whose thesis is that the cluster matches git, an unclaimed
+    # object is the thing most worth noticing, and ArgoCD will not mention it
+    # unless asked.
+    warn: true

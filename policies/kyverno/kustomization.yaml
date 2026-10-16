@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Wave 1 — admission policy before any workload. A policy that arrives after
+# the pods it governs does not retroactively evaluate them: verifyImages runs
+# only at admission (background: false, and it has to be), so a pod admitted in
+# the gap keeps running unverified until something restarts it.
+resources:
+  - 01-verify-image-signature.yaml
+  - 02-disallow-privileged.yaml
+  - 03-allowed-registries.yaml
+  - 04-require-resources.yaml
+  - 05-require-readonly-rootfs.yaml

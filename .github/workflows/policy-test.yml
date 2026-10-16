@@ -1,0 +1,118 @@
+name: policy-test
+
+# ===========================================================================
+# SHIFT LEFT. The same rules the cluster enforces, run against this repository
+# on every pull request.
+#
+# Three gates, each catching something the others cannot:
+#
+#   1. kustomize build   the manifests render at all
+#   2. conftest + OPA    the rendered manifests satisfy the Rego policy
+#   3. kyverno test      the Kyverno policies themselves still behave as
+#                        specified — unit tests for the policy, not the
+#                        manifests
+#
+# Gate 3 is the one people leave out. A policy is code, it has edge cases, and
+# the most common bug in a Rego or Kyverno rule is that it silently matches
+# NOTHING — in which case it reports PASS forever. policies/opa/workloads_test.rego
+# and policies/kyverno/tests/ both contain a case where the field under test is
+# ABSENT rather than wrong, because that is the spelling that breaks a naive
+# rule and it is also the common real-world case.
+#
+# None of this replaces admission control. CI sees the YAML in this
+# repository; Kyverno sees the live request after every mutating webhook has
+# run, including the Istio sidecar that appears in no file here.
+# ===========================================================================
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize, conftest and the kyverno CLI
+        run: |
+          set -euo pipefail
+
+          # kustomize
+          curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" \
+            | bash -s -- 5.5.0 /usr/local/bin
+
+          # conftest
+          CONFTEST_VERSION=0.56.0
+          curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin conftest
+
+          # kyverno CLI. Pinned to the series this repo's policies were
+          # verified against - see versions.env for why that matters here:
+          # kyverno.io/v1 ClusterPolicy is deprecated as of 1.19 and a newer
+          # CLI could one day stop loading it.
+          KYVERNO_VERSION=v1.19.1
+          curl -sSL "https://github.com/kyverno/kyverno/releases/download/${KYVERNO_VERSION}/kyverno-cli_${KYVERNO_VERSION}_linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin kyverno
+
+          kustomize version && conftest --version && kyverno version
+
+      # ---------------------------------------------------------------------
+      - name: Render every kustomization
+        run: |
+          set -euo pipefail
+          mkdir -p rendered
+          for d in namespaces policies/kyverno network istio workloads; do
+            out="rendered/$(echo "$d" | tr / -).yaml"
+            kustomize build "$d" > "$out"
+            # A kustomization that renders NOTHING exits 0 on some versions.
+            # The previous project lost an evening to exactly that: ArgoCD
+            # synced "successfully" having deployed an empty set.
+            [[ -s "$out" ]] || { echo "::error::$d rendered nothing"; exit 1; }
+            echo "  $d -> $(grep -c '^kind:' "$out") resources"
+          done
+
+      # ---------------------------------------------------------------------
+      - name: Unit-test the Rego policy
+        run: |
+          set -euo pipefail
+          # --strict catches unused variables and unsafe references, which is
+          # where a rule that matches nothing usually comes from.
+          conftest verify --policy policies/opa
+
+      - name: Check the rendered manifests against the Rego policy
+        run: |
+          set -euo pipefail
+          # zt-psa-off produces a WARNING by design (PSA is disabled there as a
+          # test fixture). Warnings are printed and do not fail the build;
+          # --fail-on-warn would make the deliberate exception indistinguishable
+          # from a mistake.
+          conftest test --policy policies/opa --all-namespaces rendered/*.yaml
+
+      # ---------------------------------------------------------------------
+      - name: Unit-test the Kyverno policies
+        run: |
+          set -euo pipefail
+          # Policy 01 (signature verification) is NOT covered here: verifyImages
+          # needs the registry, Fulcio and Rekor at evaluation time, so it
+          # cannot be unit-tested offline. It is exercised on the cluster by
+          # scripts/04-verify-signature-identity.sh and attack-01 instead.
+          kyverno test policies/kyverno/tests
+
+      # ---------------------------------------------------------------------
+      - name: Every workload image must be pinned by digest
+        run: |
+          set -euo pipefail
+          # Belt and braces over the Rego rule, as a grep, because this is the
+          # one property the whole signature chain rests on and a grep cannot
+          # itself be broken by a logic error in a policy.
+          if grep -rnE 'image: ghcr\.io/[^@]+:[^ ]+$' workloads/; then
+            echo "::error::an image is referenced by TAG. Pin it by digest."
+            exit 1
+          fi
+          echo "  all workload images are digest-pinned"

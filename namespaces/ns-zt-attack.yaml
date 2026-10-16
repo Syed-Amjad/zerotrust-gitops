@@ -1,0 +1,16 @@
+# Where the attacker workloads live.
+#
+# Identically configured to zt-prod — same PSA level, same sidecar injection.
+# That is the whole point: the attacks must fail because of policy, not because
+# they were run somewhere deliberately hostile to them. An attacker pod that
+# cannot reach `api` from a namespace with no sidecar would prove nothing.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zt-attack
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    istio-injection: enabled

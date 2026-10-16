@@ -1,0 +1,60 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: workloads
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+  finalizers:
+    # Without this, deleting the Application leaves its resources running and
+    # unmanaged — which in a project about the cluster matching git is the
+    # worst possible orphan.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: zerotrust
+  source:
+    repoURL: https://github.com/Syed-Amjad/zerotrust-gitops
+    # An explicit branch, not HEAD. ArgoCD resolves HEAD fine, but commit
+    # signature verification (layer 2, optional) is specified against a named
+    # revision, so using the same spelling everywhere avoids a difference that
+    # only appears once signing is switched on.
+    targetRevision: main
+    path: workloads
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: zt-prod
+  syncPolicy:
+    automated:
+      # Revert manual changes. This is what attack-06 tests.
+      selfHeal: true
+      # Delete resources removed from git. Required for the claim that the
+      # cluster matches the repository to be true in both directions.
+      prune: true
+    syncOptions:
+      - ServerSideApply=true
+
+  # =========================================================================
+  # Belt and braces against an ArgoCD/Kyverno fight that should not happen.
+  #
+  # policies/kyverno/01-verify-image-signature.yaml sets mutateDigest: false
+  # and matches Pods rather than Deployments, so Kyverno never rewrites the
+  # image field of the object ArgoCD manages. Nothing should drift.
+  #
+  # This block is here because the failure it prevents is expensive and
+  # self-inflicting: if mutateDigest is ever turned on, or the match block is
+  # widened to Deployment, Kyverno rewrites the live Deployment's image to a
+  # digest, ArgoCD sees it differ from git, selfHeal reverts it, Kyverno
+  # rewrites it again — and the two reconcile against each other indefinitely,
+  # generating a sync event every few seconds. It presents as an application
+  # that will not stabilise, not as a policy conflict.
+  #
+  # Scoped to the image field of a Deployment and nothing else, so it cannot
+  # hide any other drift. Including the drift attack-06 relies on detecting:
+  # that test changes `replicas`, which is not ignored here.
+  # =========================================================================
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      namespace: zt-prod
+      jsonPointers:
+        - /spec/template/spec/containers/0/image

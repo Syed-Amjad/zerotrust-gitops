@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# LAYER 4 — Pod Security Admission, enforced at `restricted`.
+#
+# PSA is a built-in admission plugin, not a webhook. That has a consequence
+# this project measures rather than assumes: built-in plugins run BEFORE
+# validating webhooks, so when a privileged pod is submitted here, PSA rejects
+# it and Kyverno is never consulted. The Kyverno equivalent policy is not
+# redundant — it is the layer that still works if PSA labels are removed — but
+# it is also never the thing that speaks. See ns-zt-psa-off.yaml, which exists
+# to test it in isolation, and attack 2.
+#
+# `restricted` requires, on every container: runAsNonRoot, no privilege
+# escalation, all capabilities dropped, a seccomp profile, and no host
+# namespaces, host ports or hostPath volumes.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zt-prod
+  labels:
+    # enforce  — reject
+    # audit    — allow, record in the audit log
+    # warn     — allow, return a warning to the client
+    #
+    # All three at the same level on purpose. Setting only `enforce` means a
+    # kubectl apply is rejected with no warning text, and a reader of the audit
+    # log cannot distinguish "allowed" from "not evaluated".
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+
+    # ---------------------------------------------------------------------
+    # `latest` tracks the running cluster. Convenient, and a deliberate
+    # lab-grade choice: a production namespace pins a version
+    # (e.g. v1.33), because `latest` means a cluster upgrade can tighten
+    # enforcement and start rejecting workloads that applied yesterday,
+    # during an upgrade window when you are already busy.
+    # ---------------------------------------------------------------------
+    pod-security.kubernetes.io/enforce-version: latest
+
+    # LAYER 6 entry point. Without this the sidecar is never injected and
+    # every mTLS and AuthorizationPolicy guarantee in istio/ silently does
+    # nothing — the manifests apply cleanly either way.
+    istio-injection: enabled

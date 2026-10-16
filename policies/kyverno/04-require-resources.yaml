@@ -1,0 +1,75 @@
+# ===========================================================================
+# LAYER 3 — resource limits as a SECURITY control, not a capacity one.
+#
+# Listed on the architecture diagram beside signature, privilege and registry
+# because it belongs there. A container with no memory limit can consume the
+# node until the kubelet starts evicting, and what it evicts is chosen by QoS
+# class, not by importance. On a single-node cluster the things with the least
+# generous requests are the platform components — which here means Kyverno
+# itself, the admission controller enforcing every other policy in this
+# directory.
+#
+# So an unlimited workload is a denial-of-service against the control plane
+# with extra steps, and `failurePolicy: Fail` turns a Kyverno eviction into a
+# cluster that cannot schedule. The layers are load-bearing for each other.
+# ===========================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resources
+  annotations:
+    policies.kyverno.io/title: Require CPU and memory requests and limits
+    policies.kyverno.io/category: Workload Management
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Audit
+  failurePolicy: Fail
+  background: true
+
+  rules:
+    - name: require-requests-and-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - zt-prod
+                - zt-attack
+                - zt-psa-off
+      validate:
+        message: >-
+          Every container must declare CPU and memory requests and limits.
+          A container with no memory limit can starve the node and get the
+          admission controller evicted, which disables the rest of this
+          policy set.
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    memory: "?*"
+                    cpu: "?*"
+                  limits:
+                    memory: "?*"
+                    # ---------------------------------------------------
+                    # NO CPU LIMIT IS REQUIRED, on purpose.
+                    #
+                    # Memory is incompressible: exceed the limit and the
+                    # kernel kills the process, so a limit is the only thing
+                    # that bounds the damage. CPU is compressible — the
+                    # scheduler throttles instead — and a CPU limit on a
+                    # latency-sensitive service causes throttling at p99 that
+                    # looks like an application performance bug and is
+                    # routinely misdiagnosed for weeks.
+                    #
+                    # A CPU *request* is required above, because that is what
+                    # the scheduler and the QoS class actually use.
+                    #
+                    # The Istio sidecar passes this rule as injected: Istio
+                    # sets requests of 100m/128Mi and limits of 2000m/1024Mi
+                    # by default. If a future Istio version stops doing so,
+                    # this policy starts rejecting every pod in the mesh —
+                    # one more case of a policy evaluating something the
+                    # repository does not contain.
+                    # ---------------------------------------------------

@@ -1,0 +1,107 @@
+# ===========================================================================
+# LAYER 3 — the one control here that Pod Security Admission does NOT give you.
+#
+# It is worth being precise about this, because "Kyverno plus PSA" usually
+# means two things checking the same list. PSA `restricted` requires
+# runAsNonRoot, allowPrivilegeEscalation: false, all capabilities dropped, a
+# seccomp profile, and no host namespaces. It says nothing about whether the
+# root filesystem is writable.
+#
+# A writable root filesystem is how a container becomes persistent. An attacker
+# with code execution in a read-only container has to hold what they gained in
+# memory and loses it at restart. Given somewhere to write they can drop a
+# binary, modify an interpreter path, or place something in a directory another
+# process reads — and survive the restart that would otherwise have evicted
+# them.
+#
+# This is therefore not a duplicate layer. It is the reason Kyverno is here in
+# addition to PSA rather than instead of it.
+# ===========================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-readonly-rootfs
+  annotations:
+    policies.kyverno.io/title: Require a read-only root filesystem
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Audit
+  failurePolicy: Fail
+  background: true
+
+  rules:
+    - name: readonly-rootfs
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - zt-prod
+                - zt-attack
+                - zt-psa-off
+      validate:
+        message: >-
+          Every container must set securityContext.readOnlyRootFilesystem:
+          true. Pod Security Admission at `restricted` does not require this,
+          which is why the rule is here. Mount an emptyDir for any path that
+          genuinely needs writing.
+        # -----------------------------------------------------------------
+        # foreach rather than `pattern`, for one reason: an exclusion by
+        # container name is needed, and a pattern cannot express one.
+        #
+        # istio-proxy is excluded because it is injected by a component this
+        # repository does not author, so a rule about it is a rule about
+        # Istio's defaults rather than about our workloads — and when those
+        # defaults change, the symptom is every pod in the mesh being rejected
+        # by a policy whose message points at a container nobody wrote.
+        #
+        # The sidecar is not unchecked: PSA still evaluates it at `restricted`,
+        # it runs as uid 1337 non-root with all capabilities dropped, and
+        # Istio does set a read-only root filesystem with emptyDir mounts for
+        # the paths it needs. Verify that rather than trust it:
+        #
+        #   kubectl -n zt-prod get pod -l app=api -o jsonpath=
+        #     '{.items[0].spec.containers[?(@.name=="istio-proxy")].securityContext}'
+        # -----------------------------------------------------------------
+        foreach:
+          - list: "request.object.spec.containers"
+            preconditions:
+              all:
+                - key: "{{ element.name }}"
+                  operator: NotEquals
+                  value: istio-proxy
+            deny:
+              conditions:
+                any:
+                  # `|| false` supplies the default. Without it, a container
+                  # with no securityContext at all resolves the key to null,
+                  # and a null compared against true is not a reliable deny —
+                  # the absent case is the common one and must be explicit.
+                  - key: "{{ element.securityContext.readOnlyRootFilesystem || `false` }}"
+                    operator: NotEquals
+                    value: true
+
+          # initContainers are covered separately because the key is optional
+          # and a foreach over a missing list errors rather than iterating
+          # zero times. `|| []` is the guard.
+          #
+          # This also catches native sidecars: when ENABLE_NATIVE_SIDECARS is
+          # on, Istio injects istio-proxy as an initContainer with
+          # restartPolicy: Always, so the name exclusion is repeated here.
+          - list: "request.object.spec.initContainers || `[]`"
+            preconditions:
+              all:
+                - key: "{{ element.name }}"
+                  operator: NotEquals
+                  value: istio-proxy
+                - key: "{{ element.name }}"
+                  operator: NotEquals
+                  value: istio-init
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.securityContext.readOnlyRootFilesystem || `false` }}"
+                    operator: NotEquals
+                    value: true

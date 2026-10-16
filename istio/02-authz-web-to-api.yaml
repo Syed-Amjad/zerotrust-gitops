@@ -1,0 +1,68 @@
+# ===========================================================================
+# LAYER 6, part three — the single exception to deny-all, written against an
+# IDENTITY rather than a label.
+#
+# This is the difference between layer 5 and layer 6, and it is the whole
+# reason both are in the architecture:
+#
+#   NetworkPolicy    podSelector: matchLabels: app: web
+#                    → "a pod CLAIMING to be web". Any workload author can
+#                      write that label on anything they deploy.
+#
+#   AuthorizationPolicy  principals: cluster.local/ns/zt-prod/sa/web
+#                    → "a workload holding a certificate istiod issued for
+#                      the `web` ServiceAccount in `zt-prod`". That cannot be
+#                      claimed by assertion. It requires the ServiceAccount
+#                      token, which requires the pod to have been granted that
+#                      ServiceAccount, which is an RBAC decision made at
+#                      deploy time by someone with authority to make it.
+#
+# attack-04 proves the gap is real: it deploys a pod labelled `app: web` with a
+# different ServiceAccount. The NetworkPolicy permits it. This policy refuses
+# it. A label is a claim; a SPIFFE identity is a credential.
+# ===========================================================================
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-web-to-api
+  namespace: zt-prod
+spec:
+  # Scoped to the server side. An AuthorizationPolicy is enforced by the
+  # RECIPIENT's sidecar, so the selector names api, not web — the decision is
+  # made where the request arrives, by a proxy the caller does not control.
+  selector:
+    matchLabels:
+      app: api
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            # The SPIFFE identity, minus the scheme. Istio writes principals
+            # as <trust-domain>/ns/<namespace>/sa/<serviceaccount>, so the
+            # full URI the certificate carries is
+            #   spiffe://cluster.local/ns/zt-prod/sa/web
+            # and api's /whoami endpoint reports exactly that string, read
+            # from the X-Forwarded-Client-Cert header. That is how this
+            # policy is observed holding rather than assumed to.
+            principals:
+              - "cluster.local/ns/zt-prod/sa/web"
+      to:
+        - operation:
+            methods:
+              # Read-only. The services only answer GET, so permitting POST
+              # would grant something nothing needs — and an allowlist that
+              # grants more than the application uses is how a future endpoint
+              # becomes reachable without anybody reviewing it.
+              - GET
+            paths:
+              # Path-level, which is the part NetworkPolicy structurally
+              # cannot do: at L3/L4 a connection is permitted or not, and
+              # every URL on the far side rides the same connection.
+              #
+              # /whoami is NOT listed. It is a diagnostic that reports the
+              # caller identity, and leaving it out demonstrates the
+              # granularity: `web` can call /data and is refused /whoami by
+              # the same policy that allows it in. 03-verify-enforcement.sh
+              # reaches /whoami from the gateway path instead.
+              - "/data"
+              - "/health"

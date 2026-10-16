@@ -1,0 +1,15 @@
+# State is local and must never be committed. It contains every attribute of
+# every resource, and for some resource types that includes secrets.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# Your real values, including the SSH CIDR. terraform.tfvars.example is the
+# version that belongs in git.
+terraform.tfvars
+*.auto.tfvars
+
+.terraform/
+.terraform.lock.hcl
+crash.log
+*.tfplan

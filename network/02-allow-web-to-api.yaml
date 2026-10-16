@@ -1,0 +1,98 @@
+# ===========================================================================
+# The one application flow this platform exists to serve, written out in both
+# directions.
+#
+# Egress on the caller AND ingress on the callee. Both are required: with
+# default-deny in force, the packet has to be permitted leaving web and
+# permitted arriving at api, and the two decisions are made by different
+# policies on different pods. Writing only one of them produces a flow that is
+# blocked with no indication of which end dropped it.
+#
+# Note what the selector can and cannot say. `app: web` is a LABEL, and any
+# workload author can write that label on anything. This policy therefore means
+# "a pod claiming to be web may reach api" — which is exactly why layer 6
+# exists on top of it: istio/authz-web-to-api.yaml names the ServiceAccount
+# identity, which comes from a certificate istiod issued and cannot be claimed
+# by assertion.
+# ===========================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web-egress-to-api
+  namespace: zt-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: api
+      ports:
+        - protocol: TCP
+          # The application port, not 15006.
+          #
+          # With mTLS, web's sidecar opens a TLS connection to api's POD IP on
+          # the original destination port, and api's own iptables rules
+          # redirect it to the sidecar on 15006 afterwards. That redirection
+          # happens inside api's network namespace, after the packet has
+          # already been accepted, so NetworkPolicy never sees 15006.
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-ingress-from-web
+  namespace: zt-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: web
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# ===========================================================================
+# Ingress from the mesh gateway, so there is a way in from outside.
+#
+# namespaceSelector with no podSelector allows the whole istio-system
+# namespace, which is wider than the gateway alone. It is deliberate and worth
+# naming: istiod also initiates connections to injected pods (for the
+# debug/status endpoints on 15020), and a selector tight enough to admit only
+# the ingress gateway blocks those, which shows up as sidecars reporting
+# unhealthy for reasons unrelated to the application.
+# ===========================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-mesh
+  namespace: zt-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 8001
+        - protocol: TCP
+          # 15020 — the sidecar's merged telemetry and health endpoint. The
+          # previous project spent four attempts discovering that this port has
+          # to be reachable and declared; the lesson travelled.
+          port: 15020

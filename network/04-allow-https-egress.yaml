@@ -1,0 +1,117 @@
+# ===========================================================================
+# WHERE LAYER 5 HANDS OVER TO LAYER 6 — the clearest illustration in the
+# project of why both exist.
+#
+# This policy permits outbound TCP 443 to the public internet, which looks like
+# a hole in a default-deny posture. It is the most precise rule NetworkPolicy
+# is capable of expressing here, and that limit is structural rather than a
+# shortcoming of this file.
+#
+# NetworkPolicy matches on IP addresses. The host attack-05 is allowed to reach
+# is api.github.com, which resolves to a CDN: a changing set of addresses,
+# shared with every other site behind the same provider. There are three ways
+# to write that as a CIDR list and all three are bad:
+#
+#   * today's resolved addresses   breaks without warning when they rotate
+#   * the provider's whole range   allows thousands of unrelated destinations
+#   * 0.0.0.0/0                    allows everything, which is this file
+#
+# So the honest version is the third, with the exclusions below, and the actual
+# destination filtering happens one layer up where it can be expressed:
+#
+#   istio/egress-allowlist.yaml — REGISTRY_ONLY plus ServiceEntry, matching on
+#   the SNI and HTTP Host of the request, from a workload whose identity was
+#   established by mTLS.
+#
+# L3 asks "may this pod open a socket to the internet at all". L7 asks "may
+# THIS workload reach THIS hostname". Only the second question has a useful
+# answer for a CDN, and only the first one still holds if the sidecar is
+# bypassed. Neither replaces the other.
+# ===========================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-https-egress
+  namespace: zt-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              # -------------------------------------------------------------
+              # 169.254.169.254 — the cloud instance metadata endpoint, and
+              # the reason this `except` list is not boilerplate.
+              #
+              # web has a /fetch endpoint that performs an outbound request to
+              # a URL it is handed: a deliberate SSRF, there to be attacked.
+              # Against IMDSv1 one request to this address returns the node's
+              # IAM role credentials. Excluding the whole link-local /16 means
+              # the packet is dropped by the CNI before the request is made.
+              #
+              # It is the third independent control on that path, and all
+              # three are real:
+              #   1. Istio REGISTRY_ONLY  — not a declared destination
+              #   2. this exclusion       — dropped at L3
+              #   3. IMDSv2 + hop limit 1 — unreachable from a pod netns, and
+              #                             the instance has no IAM role at all
+              #
+              # Three reasons the same attack fails is what defence in depth
+              # looks like when it has actually been tested. attack-05 removes
+              # them one at a time to show each one working alone.
+              # -------------------------------------------------------------
+              - 169.254.0.0/16
+
+              # -------------------------------------------------------------
+              # RFC1918. Two reasons, and the second matters more.
+              #
+              # First: cluster-internal traffic should be governed by the
+              # pod-and-namespace selectors in the other files, where it can
+              # be expressed per workload. A blanket 0.0.0.0/0 would silently
+              # override every one of them — ipBlock and podSelector rules are
+              # additive, so one permissive ipBlock makes the precise rules
+              # decorative.
+              #
+              # Second: 10.42.0.0/16 (k3s pods) and 10.43.0.0/16 (k3s
+              # services) both sit inside 10.0.0.0/8. Without this exclusion,
+              # this file alone would allow any pod to reach any service in
+              # the cluster on 443, and every other NetworkPolicy here would
+              # stop meaning anything. That is why the terraform picks
+              # 10.80.0.0/16 for the VPC: a range that overlaps the pod CIDR
+              # makes these exclusions impossible to write correctly.
+              # -------------------------------------------------------------
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+          # 443 only. Plaintext 80 is not permitted outbound, so a payload
+          # fetched over http:// fails at L3 before Istio is consulted — and
+          # an exfiltration attempt cannot downgrade to avoid the SNI
+          # inspection that REGISTRY_ONLY depends on.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-https-egress
+  namespace: zt-attack
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

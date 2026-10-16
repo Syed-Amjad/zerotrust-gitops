@@ -1,0 +1,45 @@
+# ATTACK 2 — a privileged container, submitted TWICE.
+#
+# The same pod goes to two namespaces because the layers do not both get a
+# turn. Pod Security Admission is a BUILT-IN admission plugin and Kyverno is a
+# VALIDATING WEBHOOK; Kubernetes runs built-in plugins first. So in zt-prod,
+# PSA refuses this and Kyverno is never consulted — and the Kyverno policy
+# would pass that test whether or not it existed.
+#
+# zt-psa-off has PSA disabled for exactly this reason. Two rejections with two
+# different messages is the evidence that two layers exist.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attack-02-privileged-psa
+  namespace: zt-prod
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: c
+      image: ghcr.io/syed-amjad/zt-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      command: ["sleep", "60"]
+      securityContext:
+        privileged: true
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {memory: 64Mi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attack-02-privileged-kyverno
+  namespace: zt-psa-off
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  containers:
+    - name: c
+      image: ghcr.io/syed-amjad/zt-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      command: ["sleep", "60"]
+      securityContext:
+        privileged: true
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {memory: 64Mi}

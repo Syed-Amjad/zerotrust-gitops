@@ -1,0 +1,181 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api
+  namespace: zt-prod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: zt-prod
+spec:
+  selector:
+    app: api
+  ports:
+    - name: http
+      # ---------------------------------------------------------------------
+      # THE NAME `http` IS LOAD-BEARING AND IS NOT A CONVENTION.
+      #
+      # Istio infers the protocol of a port from its name. A port named `http`
+      # or `http-*` is parsed as HTTP and the sidecar builds an L7 filter
+      # chain for it. Any other name — `api`, `web`, `tcp-api`, or no name at
+      # all — makes it an opaque TCP stream.
+      #
+      # The consequence lands on the AuthorizationPolicy, not here. The rules
+      # in istio/02-authz-web-to-api.yaml match on `methods: [GET]` and
+      # `paths: [/data, /health]`. Over a TCP stream the sidecar cannot see a
+      # method or a path, so those conditions cannot be satisfied — and a rule
+      # that cannot be satisfied denies. The symptom is RBAC denial on a
+      # request that the policy plainly permits, with a correct-looking policy
+      # and a correct-looking certificate.
+      #
+      # The previous project hit the same inference rule from the opposite
+      # direction, where a port named http* made Istio try to parse Prometheus
+      # telemetry as HTTP. The rule is the same; only the damage differs.
+      # ---------------------------------------------------------------------
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: zt-prod
+  labels:
+    app: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+        version: v1
+    spec:
+      serviceAccountName: api
+
+      # -----------------------------------------------------------------
+      # The application never calls the Kubernetes API, so it is given no
+      # token to call it with. Istio is unaffected: the sidecar gets its
+      # identity from a separate projected volume (`istio-token`, audience
+      # istio-ca) that the injector adds regardless of this setting.
+      #
+      # If a sidecar ever fails to obtain a certificate and logs
+      # `failed to warm certificate: ... no credential`, this is the first
+      # thing to flip back — but verify rather than assume, because the same
+      # log line is produced by the istiod egress rule in
+      # network/03-allow-istio-control-plane.yaml being absent.
+      # -----------------------------------------------------------------
+      automountServiceAccountToken: false
+
+      securityContext:
+        # ---------------------------------------------------------------
+        # seccompProfile AT POD LEVEL, and this placement is the fix for a
+        # trap rather than a style choice.
+        #
+        # PSA `restricted` requires a seccomp profile on every container. The
+        # istio-proxy container is added by a mutating webhook after this
+        # manifest is submitted, so a profile set per-container here covers
+        # the application and not the sidecar — and PSA then rejects the whole
+        # pod, naming a container that does not appear in this file:
+        #
+        #   pods "api-xxxx" is forbidden: violates PodSecurity "restricted":
+        #   seccompProfile (container "istio-proxy" must set
+        #   securityContext.seccompProfile.type to "RuntimeDefault" or
+        #   "Localhost")
+        #
+        # A pod-level profile is inherited by every container, including ones
+        # injected later. It is the only placement that composes with sidecar
+        # injection.
+        # ---------------------------------------------------------------
+        seccompProfile:
+          type: RuntimeDefault
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+
+      containers:
+        - name: api
+          # ---------------------------------------------------------------
+          # BY DIGEST, and the placeholder below is deliberately a valid
+          # SHAPE that cannot resolve.
+          #
+          # 64 zeros parses as a digest, so the manifest is well-formed and
+          # kustomize renders it — and no such image exists, so an un-bumped
+          # manifest fails loudly at the pull rather than silently deploying
+          # whatever `:latest` points at today.
+          #
+          # CI rewrites the part after the `@` on every green build. The
+          # bump-gitops job asserts the rewrite landed, because `sed` exits 0
+          # when it matches nothing and `set -e` does not catch that.
+          # ---------------------------------------------------------------
+          image: ghcr.io/syed-amjad/zt-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: APP_VERSION
+              value: v1
+            # Python would otherwise try to write .pyc files beside the
+            # source, which is on a read-only filesystem. It tolerates the
+            # failure silently, but paying an exception per import for
+            # nothing is avoidable.
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: TMPDIR
+              value: /tmp
+
+          securityContext:
+            # Required by Kyverno policy 05, and NOT required by PSA
+            # `restricted` — which is the reason that policy exists.
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+          resources:
+            # Required by Kyverno policy 04. No CPU limit on purpose — see
+            # the long comment in that policy: memory is incompressible and
+            # needs a ceiling; CPU is throttled, and a CPU limit produces p99
+            # latency that gets misdiagnosed as an application problem.
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 192Mi
+
+          volumeMounts:
+            # readOnlyRootFilesystem leaves no writable path at all, and
+            # uvicorn, httpx and the TLS library all expect a usable temporary
+            # directory. An emptyDir is the correct way to grant exactly one:
+            # it is per-pod, it does not survive a restart, and it cannot be
+            # used to persist anything across the restart that would evict an
+            # attacker.
+            - name: tmp
+              mountPath: /tmp
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

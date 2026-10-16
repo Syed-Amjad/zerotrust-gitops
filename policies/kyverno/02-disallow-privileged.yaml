@@ -1,0 +1,101 @@
+# ===========================================================================
+# LAYER 3 overlapping LAYER 4, deliberately.
+#
+# Pod Security Admission at `restricted` already rejects a privileged
+# container, so on the face of it this policy is redundant. It is kept for a
+# specific reason: PSA is driven entirely by NAMESPACE LABELS, and a namespace
+# label is editable by anyone with namespace write access. Remove one label and
+# layer 4 is gone silently, with no event and no report. This policy is the
+# layer that still refuses.
+#
+# There is a catch, and measuring it is more useful than assuming it:
+# PSA is a BUILT-IN admission plugin and Kyverno is a VALIDATING WEBHOOK.
+# Kubernetes runs built-in plugins first, so in zt-prod PSA rejects the pod and
+# this policy is never consulted. It therefore cannot be tested in zt-prod at
+# all — it would pass whether or not it existed.
+#
+# That is what the zt-psa-off namespace is for. attack-02 submits the same pod
+# to both and records which layer spoke, which is the only way to know both
+# exist.
+# ===========================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privileged
+  annotations:
+    policies.kyverno.io/title: Disallow privileged containers
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: critical
+spec:
+  validationFailureAction: Audit
+  failurePolicy: Fail
+  # Pure validation with no registry calls, so background scanning works — and
+  # is wanted here. It means existing pods are re-evaluated on a timer and
+  # appear in PolicyReports, rather than only being checked at admission.
+  background: true
+
+  rules:
+    - name: no-privileged-containers
+      match:
+        any:
+          - resources:
+              # Controllers AND Pods here, unlike policy 01. This rule mutates
+              # nothing, so matching Deployments creates no drift for ArgoCD to
+              # fight — and matching them means the rejection arrives on
+              # `kubectl apply`, where whoever typed it will see it.
+              kinds:
+                - Pod
+                - Deployment
+                - StatefulSet
+                - DaemonSet
+                - Job
+                - CronJob
+              namespaces:
+                - zt-prod
+                - zt-attack
+                - zt-psa-off
+      validate:
+        message: >-
+          Privileged containers are not permitted. A privileged container
+          shares the host kernel namespaces and can load kernel modules,
+          access every device and read the host filesystem, which makes the
+          node boundary and every other layer here irrelevant.
+        # ---------------------------------------------------------------
+        # anyPattern, because the path to the container list differs by kind.
+        # A single `pattern` written against spec.containers would silently
+        # match nothing on a Deployment, where the list is at
+        # spec.template.spec.containers — and a Kyverno pattern that matches
+        # nothing PASSES. That is the same silent-no-op failure mode as a sed
+        # with no match.
+        # ---------------------------------------------------------------
+        anyPattern:
+          # Pod
+          - spec:
+              =(initContainers):
+                - =(securityContext):
+                    =(privileged): "false"
+              containers:
+                - =(securityContext):
+                    =(privileged): "false"
+          # Deployment, StatefulSet, DaemonSet, Job
+          - spec:
+              template:
+                spec:
+                  =(initContainers):
+                    - =(securityContext):
+                        =(privileged): "false"
+                  containers:
+                    - =(securityContext):
+                        =(privileged): "false"
+          # CronJob
+          - spec:
+              jobTemplate:
+                spec:
+                  template:
+                    spec:
+                      =(initContainers):
+                        - =(securityContext):
+                            =(privileged): "false"
+                      containers:
+                        - =(securityContext):
+                            =(privileged): "false"

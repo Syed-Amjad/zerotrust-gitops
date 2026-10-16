@@ -1,0 +1,57 @@
+# ATTACK 4 — a workload that CLAIMS to be web.
+#
+# This pod is ADMITTED. Every admission policy passes: signed image (once CI
+# has written a real digest), allowed registry, not privileged, read-only root
+# filesystem, resources declared, PSA restricted satisfied. Nothing at
+# admission time is wrong with it.
+#
+# It is also labelled app=web, which is what network/02-allow-web-to-api.yaml
+# selects on — so LAYER 5 PERMITS IT TO REACH api. A NetworkPolicy cannot tell
+# a pod that IS web from a pod that SAYS it is web, because a label is written
+# by whoever wrote the manifest.
+#
+# What refuses it is the ServiceAccount. istio/02-authz-web-to-api.yaml names
+#
+#     cluster.local/ns/zt-prod/sa/web
+#
+# and this pod runs as . That identity comes from a certificate
+# istiod issued for a ServiceAccount, and it cannot be claimed by assertion —
+# it requires the token, which requires the ServiceAccount to have been
+# granted, which is an RBAC decision somebody with authority had to make.
+#
+#   kubectl apply -f 04-imposter-identity.yaml
+#   kubectl -n zt-prod exec attack-04-imposter -- #     python3 -c "import urllib.request as u; #       print(u.urlopen('http://api.zt-prod.svc.cluster.local:8000/data').status)"
+#
+# Expect HTTP 403 and an RBAC denial. An HTTP response means mTLS SUCCEEDED —
+# the imposter has a valid certificate, for the wrong identity. The mesh
+# authenticated it and then declined to authorise it, which are two separate
+# steps and the difference is the finding.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attack-04-imposter
+  namespace: zt-prod
+  labels:
+    # The claim. Satisfies every label selector in network/.
+    app: web
+spec:
+  restartPolicy: Never
+  # The credential. NOT "web". This one line is the entire attack.
+  serviceAccountName: default
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+    runAsNonRoot: true
+    runAsUser: 10001
+  containers:
+    - name: c
+      image: ghcr.io/syed-amjad/zt-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      command: ["sleep", "900"]
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {memory: 64Mi}

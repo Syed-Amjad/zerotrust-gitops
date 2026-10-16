@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kyverno-policies
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    # Without this, deleting the Application leaves its resources running and
+    # unmanaged — which in a project about the cluster matching git is the
+    # worst possible orphan.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: zerotrust
+  source:
+    repoURL: https://github.com/Syed-Amjad/zerotrust-gitops
+    # An explicit branch, not HEAD. ArgoCD resolves HEAD fine, but commit
+    # signature verification (layer 2, optional) is specified against a named
+    # revision, so using the same spelling everywhere avoids a difference that
+    # only appears once signing is switched on.
+    targetRevision: main
+    path: policies/kyverno
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # Revert manual changes. This is what attack-06 tests.
+      selfHeal: true
+      # Delete resources removed from git. Required for the claim that the
+      # cluster matches the repository to be true in both directions.
+      prune: true
+    syncOptions:
+      # ServerSideApply matters more here than anywhere else. A Kyverno
+      # ClusterPolicy has a large generated status subresource, and a
+      # client-side apply stores the whole object in the
+      # kubectl.kubernetes.io/last-applied-configuration annotation. The
+      # previous project hit the 262144-byte annotation limit installing
+      # ArgoCD this way; a policy set grows into the same wall.
+      - ServerSideApply=true
+      # Kyverno rejects a policy it considers invalid, and the rejection is
+      # what you want to see — not a retry loop around it.
+      - Validate=true

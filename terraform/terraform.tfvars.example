@@ -1,0 +1,27 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is gitignored.
+#
+# Every value below has a working default — an empty terraform.tfvars applies
+# cleanly. These are here to be changed, not to be required.
+
+# region           = "us-east-1"
+
+# t3.large (8 GB) is the default and is enough, because this project does not
+# run kube-prometheus-stack. Set t3.xlarge only if you add Prometheus, Grafana
+# and Loki back onto this box.
+# instance_type    = "t3.large"
+
+# root_volume_size = 40
+
+# Path to an SSH public key you already have. Terraform uploads the public half
+# only, and never writes a private key into state.
+# public_key_path  = "~/.ssh/id_ed25519.pub"
+
+# Leave unset to auto-detect this machine's public IP as a /32. Set it
+# explicitly only if you are behind a fixed egress address.
+# allowed_ssh_cidr = "203.0.113.42/32"
+
+# Avoid 172.31.0.0/16 (every AWS default VPC) and 10.42/10.43 (k3s pods and
+# services). An overlap with the pod range breaks cluster routing in ways that
+# look like application bugs.
+# vpc_cidr         = "10.80.0.0/16"
+# subnet_cidr      = "10.80.1.0/24"

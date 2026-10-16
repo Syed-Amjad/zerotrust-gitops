@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web
+  namespace: zt-prod
+  # The identity named in istio/02-authz-web-to-api.yaml as
+  #   cluster.local/ns/zt-prod/sa/web
+  # Rename this ServiceAccount and that policy stops matching — and the
+  # symptom is a 403 from a policy that still reads correctly.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: zt-prod
+spec:
+  selector:
+    app: web
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: zt-prod
+  labels:
+    app: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+        version: v1
+    spec:
+      serviceAccountName: web
+      automountServiceAccountToken: false
+
+      securityContext:
+        # Pod level, so the injected istio-proxy inherits it. See the long
+        # comment in api.yaml — without this, PSA rejects the pod naming a
+        # container that appears in neither manifest.
+        seccompProfile:
+          type: RuntimeDefault
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+
+      containers:
+        - name: web
+          image: ghcr.io/syed-amjad/zt-web@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8001
+          env:
+            - name: APP_VERSION
+              value: v1
+            - name: API_URL
+              # The in-cluster DNS name, not a pod IP. The AuthorizationPolicy
+              # is enforced by api's sidecar on arrival either way, but a pod
+              # IP would skip the Service and make the NetworkPolicy the only
+              # thing in the path — which is the shape of a test that passes
+              # for the wrong reason.
+              value: http://api.zt-prod.svc.cluster.local:8000
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            - name: TMPDIR
+              value: /tmp
+
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 192Mi
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

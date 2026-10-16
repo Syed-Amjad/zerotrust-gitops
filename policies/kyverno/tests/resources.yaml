@@ -1,0 +1,158 @@
+# Test fixtures for `kyverno test`. These are inputs, not deployable manifests.
+#
+# Each one isolates ONE violation so a failing result names one rule. A fixture
+# that breaks three rules at once produces three failures and tells you nothing
+# about which rule you just changed.
+---
+# The compliant baseline. Must PASS every policy. Without this, a policy set
+# that denies everything looks like a policy set that works.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: good-pod
+  namespace: zt-prod
+spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+    runAsNonRoot: true
+    runAsUser: 10001
+  containers:
+    - name: app
+      image: ghcr.io/syed-amjad/zt-api@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+      resources:
+        requests:
+          cpu: 50m
+          memory: 96Mi
+        limits:
+          memory: 192Mi
+---
+# Violates disallow-privileged only.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: privileged-pod
+  namespace: zt-psa-off
+spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: ghcr.io/syed-amjad/zt-api@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        privileged: true
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+      resources:
+        requests:
+          cpu: 50m
+          memory: 96Mi
+        limits:
+          memory: 192Mi
+---
+# Violates allowed-registries only. docker.io, which is not on the list.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: untrusted-registry-pod
+  namespace: zt-prod
+spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: docker.io/library/nginx@sha256:2222222222222222222222222222222222222222222222222222222222222222
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+      resources:
+        requests:
+          cpu: 50m
+          memory: 96Mi
+        limits:
+          memory: 192Mi
+---
+# The sidecar's registry MUST be permitted. This fixture is the regression
+# test for the trap in policy 03: injection is a mutating webhook and runs
+# BEFORE validation, so an allowlist missing docker.io/istio rejects every pod
+# in the mesh — including correctly signed ones — and blames a container that
+# appears nowhere in the repository.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sidecar-injected-pod
+  namespace: zt-prod
+spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: ghcr.io/syed-amjad/zt-api@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+      resources:
+        requests:
+          cpu: 50m
+          memory: 96Mi
+        limits:
+          memory: 192Mi
+    - name: istio-proxy
+      image: docker.io/istio/proxyv2:1.26.2
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          memory: 1024Mi
+---
+# Violates require-resources only. No limits at all.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-resources-pod
+  namespace: zt-prod
+spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: ghcr.io/syed-amjad/zt-api@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+---
+# Violates require-readonly-rootfs only — by OMITTING the field rather than
+# setting it false, which is the case a naive policy misses.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: writable-rootfs-pod
+  namespace: zt-prod
+spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: ghcr.io/syed-amjad/zt-api@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      securityContext:
+        allowPrivilegeEscalation: false
+      resources:
+        requests:
+          cpu: 50m
+          memory: 96Mi
+        limits:
+          memory: 192Mi

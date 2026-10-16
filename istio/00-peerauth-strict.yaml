@@ -1,0 +1,58 @@
+# ===========================================================================
+# LAYER 6, part one — STRICT mTLS. Every connection authenticated, both ends.
+#
+# PERMISSIVE, the default, accepts mTLS AND plaintext. It exists so a mesh can
+# be adopted incrementally, and it is the right setting during a migration. It
+# is the wrong setting afterwards, and the reason is worth stating precisely:
+# under PERMISSIVE, a workload with no sidecar can still reach everything. So
+# can a process that gets code execution inside a pod and talks to a pod IP
+# directly. The AuthorizationPolicy in 01- names ServiceAccount identities, and
+# an identity can only be established if the connection presented a
+# certificate — so under PERMISSIVE, an unauthenticated connection is matched
+# by no identity rule and the policy it was supposed to be caught by does not
+# apply to it.
+#
+# PERMISSIVE therefore does not weaken mTLS so much as it quietly removes the
+# foundation the authorization layer is standing on.
+#
+# What STRICT costs, stated because it is a real operational cost:
+#
+#   * Anything without a sidecar can no longer reach these namespaces. That
+#     includes Prometheus — in the previous project this took four attempts to
+#     resolve, and the eventual answer was to scrape the sidecar's merged
+#     telemetry endpoint on 15020 rather than the application port. There is no
+#     Prometheus in this build, but the same trap waits for anything added
+#     later.
+#   * Kubelet probes would break, except that Istio rewrites HTTP probes to go
+#     via the sidecar automatically (sidecar.istio.io/rewriteAppHTTPProbe,
+#     default true). EXEC and TCP probes are not rewritten.
+# ===========================================================================
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict-mtls
+  namespace: zt-prod
+spec:
+  # No selector: every workload in the namespace. A namespace-wide
+  # PeerAuthentication is the only kind that cannot be defeated by deploying
+  # something the selector does not match.
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict-mtls
+  namespace: zt-attack
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict-mtls
+  namespace: zt-psa-off
+spec:
+  mtls:
+    mode: STRICT

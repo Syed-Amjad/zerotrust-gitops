@@ -1,0 +1,99 @@
+# ===========================================================================
+# LAYER 6, part four — egress. Only declared destinations, per workload.
+#
+# This file only means anything because the mesh was installed with
+#
+#     meshConfig.outboundTrafficPolicy.mode = REGISTRY_ONLY
+#
+# in scripts/00-bootstrap-cluster.sh. The default is ALLOW_ANY, under which a
+# sidecar forwards traffic to any destination it does not recognise, and this
+# entire file becomes documentation of an intention. Check it before trusting
+# anything below:
+#
+#   kubectl -n istio-system get cm istio -o yaml | grep -A2 outboundTrafficPolicy
+#
+# WHAT THIS FILTERS ON, precisely. For a TLS destination the mesh matches the
+# SNI in the handshake and the DNS name, and it does NOT terminate the
+# connection — so there is no path-level filtering of an external HTTPS call
+# and this project does not claim any. Getting that would mean terminating TLS
+# to a third party inside the mesh, which is a man-in-the-middle of your own
+# traffic and brings its own certificate distribution problem.
+#
+# Hostname-level, from a named workload, is the honest description. It is also
+# the control that defeats the attack: exfiltration needs a destination, and
+# an attacker cannot add one without write access to this repository.
+# ===========================================================================
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: allow-github-api
+  namespace: zt-prod
+spec:
+  hosts:
+    - api.github.com
+  # exportTo "." confines this registry entry to zt-prod. Without it a
+  # ServiceEntry is visible mesh-wide, so declaring one destination for one
+  # namespace would quietly declare it for every namespace — including
+  # zt-attack, which would then pass attack-05 legitimately.
+  exportTo:
+    - "."
+  location: MESH_EXTERNAL
+  resolution: DNS
+  ports:
+    - number: 443
+      name: https
+      # TLS, not HTTPS: the sidecar routes on SNI and passes the connection
+      # through without terminating it. `protocol: HTTPS` would ask Istio to
+      # originate TLS itself, which needs a certificate configuration this
+      # does not have and fails in a way that looks like the host being
+      # unreachable.
+      protocol: TLS
+---
+# ===========================================================================
+# PER-WORKLOAD egress, which is the part that makes this an allowlist rather
+# than a firewall rule.
+#
+# A ServiceEntry makes a destination reachable by every workload in the
+# namespace. A Sidecar resource narrows what an individual workload can see at
+# all — the sidecar is configured with only these hosts, so anything else is
+# not merely refused, it is absent from the proxy's configuration.
+#
+# api needs no external network. Saying so explicitly means that if api is
+# ever compromised, the attacker is inside a proxy that has no route out, and
+# adding one requires a commit to this file.
+# ===========================================================================
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: api-no-egress
+  namespace: zt-prod
+spec:
+  workloadSelector:
+    labels:
+      app: api
+  egress:
+    # Only the mesh itself. `./*` is this namespace;
+    # `istio-system/*` is the control plane, without which the sidecar cannot
+    # receive the very policy that is restricting it — omit it and the proxy
+    # loses its configuration, then falls back to permitting everything.
+    - hosts:
+        - "./*"
+        - "istio-system/*"
+---
+apiVersion: networking.istio.io/v1
+kind: Sidecar
+metadata:
+  name: web-egress-allowlist
+  namespace: zt-prod
+spec:
+  workloadSelector:
+    labels:
+      app: web
+  egress:
+    - hosts:
+        - "./*"
+        - "istio-system/*"
+        # The one declared external destination. The `./` prefix scopes the
+        # lookup to ServiceEntry objects in this namespace, which is where
+        # allow-github-api above lives.
+        - "./api.github.com"

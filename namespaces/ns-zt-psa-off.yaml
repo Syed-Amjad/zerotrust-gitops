@@ -1,0 +1,46 @@
+# ===========================================================================
+# A NAMESPACE WITH POD SECURITY ADMISSION DELIBERATELY TURNED OFF.
+#
+# This looks like the worst possible thing to find in a zero-trust repository.
+# It is a test fixture, and without it one of the seven layers is untested.
+#
+# The problem it solves: PSA is a built-in admission plugin and Kyverno is a
+# validating webhook. Kubernetes runs built-in plugins first, so in zt-prod a
+# privileged pod is rejected by PSA and the request never reaches Kyverno. The
+# Kyverno privileged-container policy therefore passes its tests for a reason
+# that has nothing to do with Kyverno, and would go on passing them if the
+# policy were deleted.
+#
+# That is not a hypothetical. It is the second most common way a policy set
+# gets a false sense of coverage, after policies left in Audit mode.
+#
+# So: one namespace at PSA `privileged` (which means no PSA restrictions at
+# all), where Kyverno is the ONLY control in the path. Attack 2 submits the
+# same privileged pod to zt-prod and to here, and records which layer spoke in
+# each case. Two rejections with two different error messages is the evidence
+# that two layers exist.
+#
+# Scoping: no legitimate workload is ever deployed here, every Kyverno policy
+# in policies/kyverno/ includes this namespace in its match block, and the
+# default-deny NetworkPolicy covers it too — so a pod that PSA would have
+# stopped still cannot talk to anything. The layer removed is one of seven.
+#
+# A production cluster has no namespace like this.
+# ===========================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zt-psa-off
+  labels:
+    # `privileged` is PSA's unrestricted level. Stated explicitly rather than
+    # by omitting the labels: an unlabelled namespace inherits whatever the
+    # cluster default is, and "we think PSA is off here" is not a test fixture.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    istio-injection: enabled
+  annotations:
+    purpose: >-
+      Test fixture for attack-02. PSA is disabled here so that the Kyverno
+      privileged-container policy can be observed rejecting a pod on its own.
+      No real workload belongs in this namespace.

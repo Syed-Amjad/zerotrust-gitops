@@ -1,0 +1,114 @@
+# ===========================================================================
+# WITHOUT THIS FILE, LAYER 6 DOES NOT EXIST — and it fails in the worst
+# possible way, which is quietly.
+#
+# Every injected sidecar maintains a long-lived gRPC stream to istiod on
+# 15012. Over it the sidecar receives its certificate, its listener and cluster
+# configuration, and every AuthorizationPolicy and PeerAuthentication in the
+# mesh. Default-deny egress severs it.
+#
+# What then happens is not an outage. An Envoy that cannot reach its control
+# plane keeps serving the LAST configuration it received, and a sidecar that
+# never reached istiod at all starts with an empty one. An empty policy
+# configuration does not deny; it has nothing to deny WITH. So:
+#
+#   * PeerAuthentication STRICT is not applied        → mTLS not required
+#   * AuthorizationPolicy deny-all is not applied     → nothing is denied
+#   * the sidecar is present, healthy, and permissive
+#
+# kubectl shows the policies as applied, because they ARE applied — to the API
+# server. They just never reached the thing that enforces them. The mesh looks
+# configured and enforces nothing, which is the most dangerous failure shape in
+# the whole project.
+#
+# Verify functionally rather than by reading manifests. That is what
+# scripts/03-verify-enforcement.sh is for, and why it tests a plaintext
+# connection from outside the mesh instead of inspecting YAML.
+# ===========================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-istiod
+  namespace: zt-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          # 15012 — XDS and the certificate signing service (mTLS, the only
+          # one needed in a current Istio).
+          port: 15012
+        - protocol: TCP
+          # 15010 — the PLAINTEXT XDS port. Allowed because a misconfigured or
+          # older sidecar falls back to it, and a sidecar silently failing to
+          # reach its control plane is worse than one reaching it unencrypted
+          # inside the cluster. If you want this closed, close it and then run
+          # the verification script — do not assume.
+          port: 15010
+        - protocol: TCP
+          # 15014 — istiod's own monitoring port, used by the sidecar's
+          # readiness reporting.
+          port: 15014
+        - protocol: TCP
+          # 443 — the injection webhook and, in some versions, the certificate
+          # endpoint reached through the istiod Service.
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-istiod
+  namespace: zt-attack
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 15012
+        - protocol: TCP
+          port: 15010
+        - protocol: TCP
+          port: 15014
+        - protocol: TCP
+          port: 443
+---
+# The attacker namespace gets control-plane access too. It must: an attacker
+# pod WITHOUT a working sidecar is refused by api's mTLS at the TLS layer, and
+# the test would pass without ever evaluating the AuthorizationPolicy that is
+# supposed to be doing the work. attack-04 runs both variants precisely to tell
+# those two rejections apart.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-istiod
+  namespace: zt-psa-off
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 15012
+        - protocol: TCP
+          port: 15010
+        - protocol: TCP
+          port: 15014
+        - protocol: TCP
+          port: 443

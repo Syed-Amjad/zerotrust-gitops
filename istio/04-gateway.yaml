@@ -1,0 +1,51 @@
+# A way in from outside the mesh, so the controls can be exercised the way a
+# user would reach them rather than only from `kubectl exec`.
+#
+# That distinction matters for the attack demonstrations. A request from an
+# exec'd shell originates INSIDE the pod's network namespace, which is past
+# both the NetworkPolicy and the sidecar's inbound listener — so a control
+# that holds against a real request can appear broken when tested that way,
+# and a control that does not hold can appear fine.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: zt-gateway
+  namespace: zt-prod
+spec:
+  selector:
+    # The istio-ingressgateway deployment installed by the `default` profile.
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*"
+      # No TLS. A lab-grade decision, stated rather than glossed: the gateway
+      # is reached over an SSH tunnel from one workstation and no port is open
+      # to the internet, so a self-signed certificate would add a warning to
+      # click through and no security. A production gateway terminates TLS
+      # with a real certificate and redirects 80 to 443.
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: web
+  namespace: zt-prod
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - zt-gateway
+  http:
+    - route:
+        - destination:
+            host: web.zt-prod.svc.cluster.local
+            port:
+              # Named explicitly. The previous project learned this one the
+              # expensive way: once a Service has more than one port, a
+              # destination without an explicit port number is ambiguous, and
+              # Istio reports IST0112 — accepting the VirtualService and
+              # routing nothing.
+              number: 8001

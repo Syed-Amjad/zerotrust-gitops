@@ -1,0 +1,42 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: namespaces
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    # Without this, deleting the Application leaves its resources running and
+    # unmanaged — which in a project about the cluster matching git is the
+    # worst possible orphan.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: zerotrust
+  source:
+    repoURL: https://github.com/Syed-Amjad/zerotrust-gitops
+    # An explicit branch, not HEAD. ArgoCD resolves HEAD fine, but commit
+    # signature verification (layer 2, optional) is specified against a named
+    # revision, so using the same spelling everywhere avoids a difference that
+    # only appears once signing is switched on.
+    targetRevision: main
+    path: namespaces
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: zt-prod
+  syncPolicy:
+    automated:
+      # Revert manual changes. This is what attack-06 tests.
+      selfHeal: true
+      # Delete resources removed from git. Required for the claim that the
+      # cluster matches the repository to be true in both directions.
+      prune: true
+    syncOptions:
+      # The namespaces this Application creates do not exist when it first
+      # syncs, and ArgoCD will not create the destination namespace for an
+      # Application whose own content IS namespaces.
+      - CreateNamespace=false
+      # Server-side apply throughout. PSA labels and Istio injection labels
+      # are managed by different actors over the life of the cluster, and
+      # client-side apply overwrites the whole metadata block from a
+      # last-applied annotation rather than merging fields.
+      - ServerSideApply=true

@@ -1,0 +1,181 @@
+# Custom Falco rules for the governed namespaces.
+#
+# Mounted into /etc/falco/rules.d by the chart's `customRules` value — see
+# scripts/01-install-policy-engines.sh, which passes this file through.
+#
+# Falco ships a good default ruleset and these do not replace it. They exist
+# because the default rules are written for any cluster, so they are scoped to
+# "a container" and tuned to avoid false positives everywhere. These are scoped
+# to three namespaces whose expected behaviour is known exactly: two Python
+# processes that answer HTTP and do nothing else. In that context, behaviour
+# the default ruleset has to tolerate becomes unambiguous.
+#
+# ---------------------------------------------------------------------------
+# EVERY CONDITION BELOW DEPENDS ON k8s.ns.name BEING POPULATED.
+#
+# That field does not come from the kernel. It comes from container labels,
+# read over the container runtime socket, which is configured as a LIST at
+# collectors.containerEngine.engines.cri.sockets in values.yaml. If none of
+# those sockets exists, k8s.ns.name is <NA> on every event, `zt_namespaces`
+# matches nothing, and all four rules below silently never fire — while the
+# DEFAULT ruleset keeps firing correctly, so the log reads as a healthy
+# cluster in which the custom rules merely found nothing.
+#
+# The chart 9.x default list happens to include the k3s path already. The
+# chart 4.x spelling of that setting was a single string and is silently
+# ignored by 9.x, because the chart has no values schema — see the note at
+# the bottom of values.yaml. Do not assume either way; attack-07 asserts the
+# alert carries a real namespace rather than <NA>.
+# ---------------------------------------------------------------------------
+
+- macro: zt_namespaces
+  condition: (k8s.ns.name in (zt-prod, zt-attack, zt-psa-off))
+
+# Defined locally rather than reusing the built-in `shell_binaries` list, so a
+# ruleset upgrade that renames or re-scopes that list cannot quietly empty the
+# condition of the rule below.
+- list: zt_shell_binaries
+  items: [sh, bash, dash, ash, ksh, zsh, csh, tcsh, busybox]
+
+# ---------------------------------------------------------------------------
+# ATTACK 7. A shell in a container that has no reason to run one.
+#
+# Neither image starts a shell: the entrypoint is uvicorn, execed directly,
+# and nothing in either service shells out. So a shell process here is either a
+# human with cluster credentials or someone with code execution — and both are
+# worth an alert, which is why the rule does not try to tell them apart.
+#
+# CRITICAL rather than the default rule's NOTICE. On a cluster where operators
+# routinely exec into pods to debug, NOTICE is correct and CRITICAL would be
+# noise. Here nothing legitimate does this, so the priority can carry meaning.
+# ---------------------------------------------------------------------------
+- rule: Shell spawned in a governed namespace
+  desc: >
+    A shell was executed inside a container in zt-prod, zt-attack or
+    zt-psa-off. These images run uvicorn as PID 1 and never shell out, so any
+    shell here is an interactive session or post-exploitation activity.
+  condition: >
+    spawned_process
+    and container
+    and zt_namespaces
+    and proc.name in (zt_shell_binaries)
+  output: >
+    Shell spawned in a governed namespace
+    (shell=%proc.name parent=%proc.pname cmdline=%proc.cmdline
+    user=%user.name uid=%user.uid ns=%k8s.ns.name pod=%k8s.pod.name
+    container=%container.name image=%container.image.repository)
+  priority: CRITICAL
+  tags: [zero-trust, container, shell, mitre_execution, T1059]
+
+# ---------------------------------------------------------------------------
+# Reading a credential file. Fires on the same exec session as attack 7.
+# ---------------------------------------------------------------------------
+- rule: Sensitive file read in a governed namespace
+  desc: >
+    A process read a credential or account file. Note that
+    automountServiceAccountToken is false on both workloads, so the
+    serviceaccount path should not exist in these containers at all - a read
+    of it means something went looking for it.
+  condition: >
+    open_read
+    and container
+    and zt_namespaces
+    and (fd.name in (/etc/shadow, /etc/sudoers, /etc/gshadow)
+         or fd.name startswith /var/run/secrets/kubernetes.io/serviceaccount
+         or fd.name startswith /root/.ssh)
+    and not proc.name in (pilot-agent, envoy)
+  output: >
+    Sensitive file read in a governed namespace
+    (file=%fd.name proc=%proc.name cmdline=%proc.cmdline
+    user=%user.name ns=%k8s.ns.name pod=%k8s.pod.name
+    container=%container.name)
+  priority: CRITICAL
+  tags: [zero-trust, filesystem, mitre_credential_access, T1552]
+
+# ===========================================================================
+# A WRITE ATTEMPT THAT CANNOT SUCCEED — and the reason this rule is written by
+# hand rather than reusing the built-in macro. This is the most interesting
+# interaction between two layers in the whole project.
+#
+# Both containers run with readOnlyRootFilesystem: true, so `touch
+# /usr/bin/evil` fails with EROFS. That is layer 3 working.
+#
+# It is also the reason the default rules never see it. Falco's `open_write`
+# macro is, in essence:
+#
+#     evt.type in (open,openat,openat2) and evt.is_open_write=true
+#     and fd.typechar='f' and fd.num>=0
+#
+# `fd.num >= 0` means a file descriptor was returned — the open SUCCEEDED. A
+# failed open returns -1 and is excluded. So every default rule built on
+# open_write is structurally blind to an attempt that a read-only filesystem
+# blocked.
+#
+# That is a defensible default for a general ruleset, where failed opens are
+# mostly noise. But it means the two layers compose badly: layer 3 makes the
+# write impossible, and layer 7 consequently never records that anyone tried.
+# The clearest signal of post-exploitation activity — an attacker probing for
+# somewhere to persist — is precisely the signal the combination discards.
+#
+# Hardening one layer made another layer blind. Nothing warns you about that;
+# you only find it by attacking your own cluster and noticing an alert that
+# did not arrive.
+#
+# This condition omits the fd.num test deliberately and reports %evt.res, so a
+# successful write and a refused one are distinguishable in the alert rather
+# than one of them being invisible.
+# ===========================================================================
+- rule: Write attempt to a system directory in a governed namespace
+  desc: >
+    A process attempted to open a file for writing under a system path.
+    Matches FAILED attempts as well as successful ones, which the built-in
+    open_write macro does not - with readOnlyRootFilesystem in force every
+    such attempt fails, and the attempt is the thing worth knowing about.
+  condition: >
+    evt.type in (open, openat, openat2)
+    and evt.is_open_write=true
+    and container
+    and zt_namespaces
+    and (fd.name startswith /usr/
+         or fd.name startswith /bin/
+         or fd.name startswith /sbin/
+         or fd.name startswith /lib/
+         or fd.name startswith /etc/)
+    and not proc.name in (pilot-agent, envoy)
+  output: >
+    Write attempt to a system directory
+    (file=%fd.name result=%evt.res proc=%proc.name cmdline=%proc.cmdline
+    user=%user.name ns=%k8s.ns.name pod=%k8s.pod.name
+    container=%container.name)
+  priority: WARNING
+  tags: [zero-trust, filesystem, mitre_persistence, T1543]
+
+# ---------------------------------------------------------------------------
+# Not demonstrated by any attack script, and kept anyway.
+#
+# Neither image contains a package manager, a compiler or a network client, so
+# this can only fire if something fetched one — which is several steps into a
+# compromise and is the point at which detection is most valuable and least
+# likely to be a false positive.
+#
+# A rule with no demo is not dead weight. A ruleset containing only rules you
+# have a demo for is a ruleset written for the demo.
+# ---------------------------------------------------------------------------
+- rule: Package manager or network tool run in a governed namespace
+  desc: >
+    Neither workload image ships apt, pip, gcc, curl or netcat in its runtime
+    path. Execution of one indicates tooling was introduced after the image
+    was built and signed, which defeats the point of signing it.
+  condition: >
+    spawned_process
+    and container
+    and zt_namespaces
+    and proc.name in (apt, apt-get, dpkg, pip, pip3, gcc, cc, make,
+                      curl, wget, nc, ncat, socat, nmap)
+  output: >
+    Package manager or network tool executed in a governed namespace
+    (proc=%proc.name cmdline=%proc.cmdline user=%user.name
+    ns=%k8s.ns.name pod=%k8s.pod.name container=%container.name
+    image=%container.image.repository)
+  priority: CRITICAL
+  tags: [zero-trust, container, mitre_execution, T1072]

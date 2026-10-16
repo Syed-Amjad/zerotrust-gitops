@@ -1,0 +1,56 @@
+# ===========================================================================
+# LAYER 5 — default deny at L3/L4. The posture everything else is an exception
+# to.
+#
+# An empty podSelector selects EVERY pod in the namespace. Listing both
+# policyTypes with no rules underneath means "no ingress is allowed and no
+# egress is allowed", which is the only way Kubernetes expresses default deny:
+# there is no `deny` verb, only the absence of an `allow`.
+#
+# The ordering consequence is the thing to get right. NetworkPolicies are
+# additive and non-conflicting — a pod is allowed a flow if ANY policy permits
+# it — so this file is harmless on its own and becomes an outage the moment it
+# lands without 01-allow-dns.yaml. They are in the same ArgoCD sync wave for
+# that reason.
+#
+# This is the same default-deny-plus-explicit-allowlist shape I run on host
+# firewalls across a Linux fleet in production. The difference here is the unit
+# of policy: there, a rule names an address; here it names a workload, and the
+# workload keeps its identity when it is rescheduled onto a different node with
+# a different address.
+# ===========================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: zt-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: zt-attack
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# zt-psa-off has Pod Security Admission disabled as a test fixture. It gets the
+# same network posture as everywhere else, so the one layer removed there is
+# one layer and not two.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: zt-psa-off
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

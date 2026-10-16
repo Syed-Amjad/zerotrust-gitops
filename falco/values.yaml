@@ -1,0 +1,185 @@
+# Helm values for Falco — LAYER 7, runtime behavioural detection.
+#
+# Verified against chart 9.2.0 (Falco 0.45.0) by rendering it. That matters
+# more than usual here — see the note at the bottom of this file about what
+# happened when it was written against the older schema.
+#
+# Installed by scripts/01-install-policy-engines.sh rather than by ArgoCD.
+# Falco is a privileged DaemonSet that loads an eBPF program into the kernel,
+# and the AppProject deliberately does not whitelist the cluster-scoped
+# resources that needs. Keeping the thing that watches the cluster outside the
+# thing that deploys to the cluster is also the right separation: a compromise
+# of the GitOps path should not be able to remove the detection that would
+# notice it.
+
+driver:
+  enabled: true
+  # =========================================================================
+  # modern_ebpf, chosen over the chart default of `auto`.
+  #
+  # The chart's options are kmod, modern_ebpf and auto:
+  #
+  #   kmod         a kernel module built with DKMS. Needs linux-headers for
+  #                the running kernel, breaks on kernel upgrades, taints the
+  #                kernel.
+  #   modern_ebpf  a CO-RE program shipped inside the Falco image. No headers,
+  #                no compiler, no build step, survives kernel upgrades.
+  #   auto         picks whatever works on this node.
+  #
+  # `auto` would almost certainly land on modern_ebpf here, and it is still
+  # the wrong setting for this project: it makes the driver in use a property
+  # of the node rather than of the repository, so the same commit behaves
+  # differently on different machines and a silent fallback to kmod would be
+  # visible only in the logs. Naming it makes a failure loud.
+  #
+  # CO-RE needs BTF in the kernel (CONFIG_DEBUG_INFO_BTF) and kernel 5.8+.
+  # Ubuntu 24.04 ships 6.8 with BTF enabled, so this works on the AMI the
+  # terraform selects. 01-install-policy-engines.sh checks for
+  # /sys/kernel/btf/vmlinux BEFORE installing, because a Falco that loads no
+  # driver still starts, still reports Ready, and reports zero events — which
+  # is indistinguishable from a quiet cluster.
+  # =========================================================================
+  kind: modern_ebpf
+
+collectors:
+  enabled: true
+
+  # =========================================================================
+  # CONTAINER METADATA — the source of k8s.ns.name, which every custom rule
+  # in custom-rules.yaml depends on.
+  #
+  # Each rule is scoped with `k8s.ns.name in (zt-prod, zt-attack, zt-psa-off)`.
+  # That field does not come from the kernel; it comes from container labels
+  # read over the runtime socket. Without it the field is <NA> on every event,
+  # the scope matches nothing, and all five rules silently never fire — while
+  # the DEFAULT ruleset keeps firing correctly, so the log looks healthy and
+  # the custom rules merely look like they found nothing.
+  #
+  # In chart 9.x this is handled by the `container` plugin, which takes a LIST
+  # of candidate sockets per engine and uses whichever exists. The chart
+  # default for `cri` already includes /run/k3s/containerd/containerd.sock, so
+  # on k3s it works out of the box. It is restated here anyway: a default that
+  # happens to be right is not the same thing as a decision, and the next
+  # person reading this file should be able to see that the k3s path was
+  # considered rather than lucky.
+  # =========================================================================
+  containerEngine:
+    enabled: true
+    engines:
+      cri:
+        enabled: true
+        sockets:
+          # k3s first, because it is what this project runs on.
+          - /run/k3s/containerd/containerd.sock
+          # Kept so the same values file works on a vanilla containerd or
+          # CRI-O node without edits.
+          - /run/containerd/containerd.sock
+          - /run/crio/crio.sock
+      containerd:
+        enabled: true
+        sockets:
+          - /run/host-containerd/containerd.sock
+      # Not present on this node. Disabled explicitly rather than left on: an
+      # enabled engine whose socket is missing produces a steady stream of
+      # connection errors that buries the alerts you are looking for.
+      docker:
+        enabled: false
+      podman:
+        enabled: false
+
+  # k8s-metacollector, off. It is a separate Deployment (a chart dependency
+  # gated on this flag) that enriches events with k8smeta.* fields — pod
+  # owners, labels, deployment names. Worth having on a real cluster.
+  #
+  # Off here for two reasons: the k8s.* fields the custom rules use come from
+  # the container plugin above rather than from this, and it is another
+  # ~150 MB on an 8 GB node. Turning it on leaves the rules working unchanged.
+  kubernetes:
+    enabled: false
+
+falco:
+  # JSON, so output is greppable and jq-able:
+  #   kubectl -n falco logs -l app.kubernetes.io/name=falco | jq -c 'select(.rule)'
+  #
+  # The chart default is false. Human-readable output is easier to read one
+  # line at a time and much harder to filter — the wrong trade when you need
+  # to pull one specific event out of a running log.
+  json_output: true
+  json_include_output_property: true
+  log_level: info
+
+  # Load order matters: the default ruleset first, then rules.d, where
+  # customRules is mounted. A later file can override an earlier rule of the
+  # same name, which is how a default rule's priority can be raised.
+  rules_files:
+    - /etc/falco/falco_rules.yaml
+    - /etc/falco/falco_rules.local.yaml
+    - /etc/falco/rules.d
+
+# Resource limits, for the reason Kyverno policy 04 gives: on a single node an
+# unbounded workload gets the control plane evicted, and Falco is the thing
+# most likely to be watching when that happens.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+falcosidekick:
+  # Fans events out to somewhere that is not a pod log. `kubectl logs` is a bad
+  # place to demonstrate a detection from: it is per-pod, it rotates, and it is
+  # gone when the pod restarts.
+  enabled: true
+  webui:
+    # Off by default — it brings a Redis, roughly 150 MB on an 8 GB box.
+    # 01-install-policy-engines.sh enables it when FALCO_UI=1, which is worth
+    # doing for a screenshot and not worth leaving on.
+    #
+    # These keys belong to the falcosidekick SUBCHART, a dependency of this
+    # chart gated on falcosidekick.enabled, and Helm passes them through.
+    enabled: false
+  config:
+    debug: false
+
+# ===========================================================================
+# A DEFECT FOUND IN THIS FILE, RECORDED HERE BECAUSE IT IS THE PROJECT'S OWN
+# THESIS HAPPENING TO THE PROJECT.
+#
+# The first version of this file was written against the chart 4.x schema,
+# which configured the runtime socket as a single string:
+#
+#     collectors:
+#       containerd:
+#         enabled: true
+#         socket: /run/k3s/containerd/containerd.sock
+#
+# Chart 9.x replaced that with the containerEngine plugin and a LIST of
+# sockets per engine. `collectors.containerd.socket` no longer exists.
+#
+# The chart ships NO values.schema.json. Helm therefore accepts unknown keys
+# silently — no warning, no error, exit code 0. `helm install` succeeds, Falco
+# starts, the driver loads, syscalls are captured, and the default rules fire
+# correctly. The setting simply has no effect.
+#
+# Had chart 9.x's default `cri` socket list not already included the k3s path,
+# the result would have been: every event labelled k8s.ns.name=<NA>, every
+# custom rule matching nothing, and a log full of correctly-detected events
+# from the default ruleset that made the whole thing look fine. The detection
+# layer would have reported zero findings and been believed.
+#
+# It was caught by rendering the chart with these values and reading the
+# output — not by reading either file, both of which looked correct.
+#
+# Two things follow, and they are why versions.env exists:
+#
+#   1. A silently-ignored configuration key is the most expensive kind of
+#      error, because nothing anywhere reports it. Verify by rendering:
+#
+#        helm template falco falcosecurity/falco --version 9.2.0 \
+#          -f falco/values.yaml | grep -A6 sockets
+#
+#   2. Pinning the chart is not conservatism. An unpinned install that moved
+#      from 4.x to 9.x would have carried this file across a schema change
+#      and lost a setting on the way, with a green install either side of it.
+# ===========================================================================

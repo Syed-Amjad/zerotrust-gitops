@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Wave 3 — mesh policy before the workloads it governs.
+#
+# The ordering here matters more than it did in the previous project, where a
+# late DestinationRule simply matched no pods for a while. Here the resources
+# are DENIALS. Landing them after the workloads leaves a window in which the
+# application is running and unauthenticated, and nothing announces the window
+# opening or closing.
+#
+# The reverse order is the safer failure: policy applied to a namespace with no
+# pods in it denies nothing, because there is nothing to deny.
+resources:
+  - 00-peerauth-strict.yaml
+  - 01-authz-default-deny.yaml
+  - 02-authz-web-to-api.yaml
+  - 03-egress-allowlist.yaml
+  - 04-gateway.yaml

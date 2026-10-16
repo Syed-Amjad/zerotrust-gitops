@@ -1,0 +1,78 @@
+# Unit tests for the Kyverno policies. Run offline, with no cluster:
+#
+#   kyverno test policies/kyverno/tests
+#
+# Wired into .github/workflows/policy-test.yml, so a pull request that breaks
+# a policy fails before it can be merged and synced.
+#
+# ---------------------------------------------------------------------------
+# WHY POLICY 01 (SIGNATURE VERIFICATION) IS NOT TESTED HERE.
+#
+# verifyImages needs the registry, Fulcio and Rekor at evaluation time, so it
+# cannot be unit-tested offline — `kyverno test` would either skip it or
+# report a network error, and a test that reports "skipped" alongside real
+# results is how an untested rule gets counted as tested.
+#
+# It is covered by two things instead, both of which exercise the live path:
+#   scripts/04-verify-signature-identity.sh   cosign verify with the correct
+#                                             identity and with a wrong one
+#   scripts/attack-01-unsigned-image.sh       the admission decision itself
+# ---------------------------------------------------------------------------
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: zerotrust-admission-policies
+policies:
+  - ../02-disallow-privileged.yaml
+  - ../03-allowed-registries.yaml
+  - ../04-require-resources.yaml
+  - ../05-require-readonly-rootfs.yaml
+resources:
+  - resources.yaml
+results:
+  # --- the compliant baseline must pass everything -------------------------
+  # Listed against every policy on purpose. A policy set is only as useful as
+  # its false-positive rate, and these four lines are what would catch a rule
+  # tightened until nothing can be deployed.
+  - policy: disallow-privileged
+    rule: no-privileged-containers
+    kind: Pod
+    resources: [good-pod, untrusted-registry-pod, no-resources-pod, writable-rootfs-pod, sidecar-injected-pod]
+    result: pass
+  - policy: allowed-registries
+    rule: only-trusted-registries
+    kind: Pod
+    resources: [good-pod, privileged-pod, no-resources-pod, writable-rootfs-pod, sidecar-injected-pod]
+    result: pass
+  - policy: require-resources
+    rule: require-requests-and-limits
+    kind: Pod
+    resources: [good-pod, privileged-pod, untrusted-registry-pod, writable-rootfs-pod, sidecar-injected-pod]
+    result: pass
+  - policy: require-readonly-rootfs
+    rule: readonly-rootfs
+    kind: Pod
+    resources: [good-pod, privileged-pod, untrusted-registry-pod, no-resources-pod, sidecar-injected-pod]
+    result: pass
+
+  # --- each violation must be caught by exactly its own rule ---------------
+  - policy: disallow-privileged
+    rule: no-privileged-containers
+    kind: Pod
+    resources: [privileged-pod]
+    result: fail
+  - policy: allowed-registries
+    rule: only-trusted-registries
+    kind: Pod
+    resources: [untrusted-registry-pod]
+    result: fail
+  - policy: require-resources
+    rule: require-requests-and-limits
+    kind: Pod
+    resources: [no-resources-pod]
+    result: fail
+  - policy: require-readonly-rootfs
+    rule: readonly-rootfs
+    kind: Pod
+    resources: [writable-rootfs-pod]
+    result: fail

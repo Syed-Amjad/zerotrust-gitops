@@ -1,0 +1,23 @@
+# Attack transcripts are generated per run. The ONE you want to keep goes in
+# docs/ renamed, deliberately — see docs/ATTACK-RESULTS.md.
+docs/attack-run-*.log
+
+# Rendered output from CI and local policy checks.
+rendered/
+
+# Terraform state is handled by terraform/.gitignore. Repeated here because a
+# state file committed to a public repository is the single worst thing that
+# can happen to this project, and belt-and-braces costs nothing.
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+
+# Keys. Nothing in this repository should ever hold one, which is the point of
+# keyless signing — but scripts/05-enable-commit-signing.sh touches GPG and a
+# stray export would land here.
+*.key
+*.pem
+*.gpg
+*.asc
+
+.DS_Store

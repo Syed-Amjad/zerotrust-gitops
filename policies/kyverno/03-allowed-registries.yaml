@@ -1,0 +1,86 @@
+# ===========================================================================
+# LAYER 3 — where images may come from at all.
+#
+# This runs BEFORE the signature question is interesting. A signature says
+# "these bytes came from our builder"; a registry allowlist says "we will not
+# even look at bytes from somewhere we have no relationship with". The second
+# is cruder and catches a whole class of mistake the first cannot: a copy-pasted
+# manifest referencing a public image, a typosquatted name, a sidecar somebody
+# added from a blog post.
+# ===========================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: allowed-registries
+  annotations:
+    policies.kyverno.io/title: Restrict image registries
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Audit
+  failurePolicy: Fail
+  background: true
+
+  rules:
+    - name: only-trusted-registries
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - zt-prod
+                - zt-attack
+                - zt-psa-off
+      validate:
+        message: >-
+          Images may only be pulled from ghcr.io/syed-amjad (our own published
+          artifacts) or docker.io/istio (the sidecar, injected by the mesh).
+          Everything else is refused.
+        pattern:
+          spec:
+            # =( ) marks the key as optional — "validate this if present".
+            # Without it, a pod with no initContainers FAILS the pattern,
+            # because the key it is being asked about does not exist.
+            =(ephemeralContainers):
+              - image: "ghcr.io/syed-amjad/* | docker.io/istio/* | istio/*"
+            =(initContainers):
+              - image: "ghcr.io/syed-amjad/* | docker.io/istio/* | istio/*"
+            containers:
+              - image: "ghcr.io/syed-amjad/* | docker.io/istio/* | istio/*"
+
+# ===========================================================================
+# WHY docker.io/istio IS ON THE ALLOWLIST — and why leaving it off breaks
+# every pod in the mesh.
+#
+# Kubernetes admission runs mutating webhooks BEFORE validating webhooks.
+# Istio's sidecar injector is a mutating webhook. So by the time this policy
+# evaluates the pod, the pod has three containers it was not submitted with:
+#
+#     istio-proxy        docker.io/istio/proxyv2:<version>
+#     (istio-init)       docker.io/istio/proxyv2:<version>   — CNI mode omits this
+#
+# An allowlist containing only ghcr.io/syed-amjad therefore rejects EVERY
+# injected pod, including the correctly signed ones, and the message blames an
+# image nobody in the repository wrote:
+#
+#   validation error: Images may only be pulled from ... rule
+#   only-trusted-registries failed at path /spec/containers/1/image/
+#
+# `/spec/containers/1` is the sidecar. Searching the repository for that image
+# reference finds nothing, because it was added 20 milliseconds earlier by
+# another webhook.
+#
+# The general lesson, which outlasts Istio: an admission policy sees the
+# resource AFTER every mutation, not as it was submitted. Any policy about
+# pod contents has to account for what the cluster itself adds.
+#
+# `istio/*` without a registry is listed as well. istioctl writes the fully
+# qualified `docker.io/istio/proxyv2`, but a Helm-based install or a custom
+# `global.hub` can produce the short form, and Kyverno matches the string as
+# written in the pod spec rather than a normalised one.
+#
+# WHAT THIS ALLOWLIST DOES NOT DO: it is a name check, not an identity check.
+# Anyone who can push to ghcr.io/syed-amjad satisfies it. That is exactly the
+# gap policy 01 closes, and the reason both exist.
+# ===========================================================================
