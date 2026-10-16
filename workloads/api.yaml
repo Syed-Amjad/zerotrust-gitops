@@ -114,7 +114,7 @@ spec:
           # bump-gitops job asserts the rewrite landed, because `sed` exits 0
           # when it matches nothing and `set -e` does not catch that.
           # ---------------------------------------------------------------
-          image: ghcr.io/syed-amjad/zt-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          image: ghcr.io/syed-amjad/zt-api@sha256:d6a3db3d3e0330b0294dd56bfe62a742e6179cfb25eefc9ec26fa1d558f28f07
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

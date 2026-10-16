@@ -56,7 +56,7 @@ spec:
 
       containers:
         - name: web
-          image: ghcr.io/syed-amjad/zt-web@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          image: ghcr.io/syed-amjad/zt-web@sha256:636fb7f091c5e24690f17ce144df6105e45897cec194c7b6129c534a03b5ca1b
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
