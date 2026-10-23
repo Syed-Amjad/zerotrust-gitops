@@ -39,7 +39,26 @@ WEB_POD="$(kubectl -n zt-prod get pod -l app=web -o jsonpath='{.items[0].metadat
 # Calls /fetch INSIDE the pod, so the request to the external host originates
 # from the application process — which is what the sidecar intercepts.
 fetch() {  # $1 = target url
-  kubectl -n zt-prod exec -i "$WEB_POD" -c web -- python3 - "$1" <<'PY' 2>/dev/null
+  # DO NOT SEND STDERR TO /dev/null HERE. It used to, and when `kubectl exec`
+  # itself failed - a container still starting, a missing python3, the wrong
+  # -c name - this function returned the empty string and the reason was
+  # discarded. Every destination then printed as a bare URL with no result,
+  # and the script read that silence as "blocked". An absent result is not a
+  # block: it is no evidence either way, and in a script whose entire output
+  # is evidence that is the worst possible failure.
+  local out err rc=0
+  err="$(mktemp)"
+  out="$(_fetch_inner "$1" 2>"$err")" || rc=$?
+  if [[ -z "$out" ]]; then
+    printf 'NO RESULT  (exec rc=%s)  %s\n' "$rc" "$(head -c 200 "$err" | tr '\n' ' ')"
+  else
+    printf '%s\n' "$out"
+  fi
+  rm -f "$err"
+}
+
+_fetch_inner() {  # $1 = target url
+  kubectl -n zt-prod exec -i "$WEB_POD" -c web -- python3 - "$1" <<'PY'
 import json, sys, urllib.parse, urllib.request
 target = urllib.parse.quote(sys.argv[1], safe="")
 try:
@@ -82,10 +101,25 @@ fi
 
 hdr "2. An UNDECLARED destination — must be BLOCKED"
 rule
+UNDECLARED_BLOCKED=0
+UNDECLARED_TOTAL=0
 for target in 'https://example.com/' 'https://pastebin.com/raw/abc123'; do
-  printf '      %-42s %s\n' "$target" "$(fetch "$target")"
+  R="$(fetch "$target")"
+  printf '      %-42s %s\n' "$target" "$R"
+  UNDECLARED_TOTAL=$((UNDECLARED_TOTAL+1))
+  printf '%s' "$R" | grep -q BLOCKED && UNDECLARED_BLOCKED=$((UNDECLARED_BLOCKED+1))
 done
 rule
+# ASSERT it, rather than asserting it in prose underneath. The paragraph below
+# is true only if the probe actually reported BLOCKED; printed under a NO
+# RESULT it would be a confident explanation of something that never happened.
+if [[ "$UNDECLARED_BLOCKED" -eq "$UNDECLARED_TOTAL" ]]; then
+  ok "$UNDECLARED_BLOCKED/$UNDECLARED_TOTAL undeclared destinations reported BLOCKED"
+else
+  warn "only $UNDECLARED_BLOCKED/$UNDECLARED_TOTAL reported BLOCKED - the rest"
+  warn "returned no usable result, which is not the same as being refused."
+  warn "The explanation below applies to the BLOCKED ones only."
+fi
 note "The refusal comes from web's OWN sidecar, outbound, before a packet"
 note "leaves the pod. Nothing was sent anywhere, so there is no DNS query and"
 note "no TCP connection for a network monitor to notice — which is the"
@@ -120,8 +154,10 @@ note "a later attack would then silently pass through."
 # The verdict used to be a hardcoded `verdict 0`, so it printed "CONTROL HELD
 # - declared egress works" on a run where part 1 had just reported the
 # declared host unreachable. A verdict that cannot fail is not a verdict.
-if [[ "${DECLARED_OK:-1}" -eq 0 ]]; then
+if [[ "${DECLARED_OK:-1}" -eq 0 && "${UNDECLARED_BLOCKED:-0}" -eq "${UNDECLARED_TOTAL:-1}" ]]; then
   verdict 0 "declared egress works, undeclared egress and metadata are refused"
+elif [[ "${UNDECLARED_BLOCKED:-0}" -ne "${UNDECLARED_TOTAL:-1}" ]]; then
+  verdict 1 "the probe produced no usable result for at least one destination - this run is evidence of nothing, fix the probe before reading anything into it"
 else
   verdict 1 "undeclared egress was refused, but so was the DECLARED host - so this run does not prove an allowlist, only that egress is closed"
 fi
