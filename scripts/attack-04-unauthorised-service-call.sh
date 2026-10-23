@@ -41,7 +41,12 @@ metadata:
 $2
 spec:
   restartPolicy: Never
-  # The default ServiceAccount, NOT `web`. This is the entire attack: the pod
+  # The default ServiceAccount, NOT "web". This is the entire attack: the pod
+  # (No backticks in this comment. It sits inside an UNQUOTED heredoc, so
+  # bash performs command substitution on the body before kubectl ever sees
+  # it - `web` ran as a command and printed "web: command not found" twice
+  # per run. A YAML comment is still a shell expansion context when it is
+  # inside <<POD rather than <<'POD'.)
   # looks like web to every label selector and is a different principal to
   # the mesh.
   serviceAccountName: default

@@ -60,7 +60,9 @@ rule
 D="$(fetch 'https://api.github.com/zen')"
 printf '      %s\n' "$D"
 rule
+DECLARED_OK=1
 if printf '%s' "$D" | grep -q REACHED; then
+  DECLARED_OK=0
   ok "Reachable, as declared"
   note "This half matters as much as the blocks below. An egress policy that"
   note "refuses everything is indistinguishable from a broken network, and"
@@ -69,6 +71,13 @@ else
   warn "The declared host was NOT reachable. Check the ServiceEntry and the"
   warn "Sidecar egress hosts for web:"
   warn "    kubectl -n zt-prod get serviceentry,sidecar"
+  warn ""
+  warn "This invalidates the blocks below rather than merely being one"
+  warn "failure among them: if the ALLOWED host is also unreachable, then"
+  warn "'undeclared destination refused' is not evidence of an allowlist. It"
+  warn "is consistent with egress being broken outright, which would produce"
+  warn "exactly the same output for every destination."
+  kubectl -n zt-prod get serviceentry,sidecar 2>/dev/null | sed 's/^/      /'
 fi
 
 hdr "2. An UNDECLARED destination — must be BLOCKED"
@@ -108,4 +117,11 @@ note "Removing them one at a time is how you find out which ones are actually"
 note "load-bearing. Doing that is a worthwhile exercise and it is NOT what"
 note "this script does — it would leave the cluster in a weakened state that"
 note "a later attack would then silently pass through."
-verdict 0 "declared egress works, undeclared egress and metadata are refused"
+# The verdict used to be a hardcoded `verdict 0`, so it printed "CONTROL HELD
+# - declared egress works" on a run where part 1 had just reported the
+# declared host unreachable. A verdict that cannot fail is not a verdict.
+if [[ "${DECLARED_OK:-1}" -eq 0 ]]; then
+  verdict 0 "declared egress works, undeclared egress and metadata are refused"
+else
+  verdict 1 "undeclared egress was refused, but so was the DECLARED host - so this run does not prove an allowlist, only that egress is closed"
+fi

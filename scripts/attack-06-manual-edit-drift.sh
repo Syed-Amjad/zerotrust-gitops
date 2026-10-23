@@ -77,7 +77,33 @@ if [[ "$REVERTED" -eq 1 ]]; then
   note "a slow revert is a real window an attacker could work inside."
 else
   bad "Still at $(kubectl -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.spec.replicas}') after 60s"
-  note "    kubectl -n argocd get app workloads -o wide"
+  # Print the reason instead of two commands to go and run. selfHeal can only
+  # act on an Application whose sync status it has been able to COMPUTE: if
+  # that status is Unknown, ArgoCD has no diff to correct and will sit there
+  # indefinitely while selfHeal reads as true. The first run of this script
+  # reported "drift persisted" against an application that was Unknown, which
+  # looks like selfHeal not working and is actually selfHeal never being
+  # asked.
+  SYNC="$(kubectl -n argocd get app workloads \
+          -o jsonpath='{.status.sync.status}' 2>/dev/null || true)"
+  note ""
+  note "workloads sync status = ${SYNC:-<unreadable>}"
+  if [[ "$SYNC" != "Synced" && "$SYNC" != "OutOfSync" ]]; then
+    note ""
+    note "THAT IS THE REASON. selfHeal corrects a computed difference, and"
+    note "with sync status '${SYNC:-<unreadable>}' there is no computed"
+    note "difference to correct. selfHeal is on and was never asked to act."
+    note "This is not a failure of layer 2 - it is an Application that has"
+    note "not finished comparing itself to git."
+  fi
+  note ""
+  note "Conditions ArgoCD is reporting:"
+  kubectl -n argocd get app workloads \
+    -o jsonpath='{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}' \
+    2>/dev/null | sed 's/^/      /' || true
+  note ""
+  note "Force a comparison and watch again:"
+  note "    kubectl -n argocd patch app workloads --type merge -p '{\"operation\":{\"sync\":{}}}'"
   note "    kubectl -n argocd logs statefulset/argocd-application-controller --tail=50"
   verdict 1 "drift persisted"
   kubectl -n "$NS" scale deploy "$DEPLOY" --replicas="$DECLARED"

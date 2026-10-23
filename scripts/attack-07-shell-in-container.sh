@@ -29,9 +29,27 @@ hdr "Timestamp, so the alert can be tied to this action"
 SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 note "$SINCE"
 
+# Wait for the pod to be Ready before exec'ing into it. attack-06 scales this
+# deployment up and down, so on a full run the pod here can be seconds old and
+# still starting its sidecar - and `kubectl exec` into a container whose init
+# has not finished fails with:
+#
+#   OCI runtime exec failed: unable to start container process:
+#   procReady not received
+#
+# which names runc and reads like a broken runtime rather than a race.
+hdr "Waiting for $POD to be Ready before exec"
+if kubectl -n zt-prod wait --for=condition=Ready "pod/$POD" --timeout=120s >/dev/null 2>&1; then
+  ok "Ready"
+else
+  warn "$POD did not become Ready in 120s - exec will probably fail."
+  kubectl -n zt-prod get pod "$POD" -o wide 2>/dev/null | sed 's/^/      /'
+fi
+
 hdr "Executing a shell in $POD, and three things inside it"
 note "One exec session, deliberately tripping three independent rules."
 rule
+EXEC_RC=0
 kubectl -n zt-prod exec -i "$POD" -c api -- sh -c '
   echo "  [1] shell running as uid $(id -u) in $(hostname)"
 
@@ -45,8 +63,26 @@ kubectl -n zt-prod exec -i "$POD" -c api -- sh -c '
   # that condition on purpose.
   echo "  [3] attempting to write /usr/bin/evil"
   touch /usr/bin/evil 2>&1 | head -1 || echo "      refused (expected: read-only filesystem)"
-' 2>&1 | sed 's/^/      /'
+' 2>&1 | sed 's/^/      /' || EXEC_RC=$?
 rule
+
+# CHECK THE EXIT STATUS. This used to print "The shell ran" unconditionally,
+# and on the run where exec failed with `procReady not received` it said so
+# anyway - and then reported "layer 7 produced nothing" as a Falco failure.
+# Falco was right: nothing happened. A detection layer cannot be blamed for
+# not alerting on an action that never took place, and a script that claims
+# the action succeeded turns its own bug into someone else's failure.
+if [[ "$EXEC_RC" -ne 0 ]]; then
+  bad "THE SHELL DID NOT RUN (kubectl exec exited $EXEC_RC)."
+  note "Everything below is therefore meaningless: Falco has nothing to"
+  note "detect, and an absence of alerts is the correct outcome, not a"
+  note "failure of layer 7."
+  note ""
+  note "If the message mentioned 'procReady not received', the container was"
+  note "still starting. Re-run this script on its own:"
+  note "    ./scripts/attack-07-shell-in-container.sh"
+  exit 1
+fi
 ok "The shell ran. No preventive layer had anything to say about it."
 
 hdr "Waiting for Falco to report"
