@@ -28,6 +28,44 @@ set -euo pipefail
 ok()   { printf '\033[1;32m    %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m    %s\033[0m\n' "$*"; }
 hdr()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
+
+# ===========================================================================
+# THIS SCRIPT PATCHES THE CLUSTER, AND ARGOCD OWNS THE CLUSTER.
+#
+# `validationFailureAction` is declared in policies/kyverno/*.yaml as `Audit`.
+# The kyverno-policies Application syncs that path with selfHeal: true, so a
+# `kubectl patch` flipping a policy to Enforce is drift, and ArgoCD reverts it
+# at the next reconciliation - about three minutes, which is shorter than an
+# attack run. The switch appears to work, the first attacks are blocked, and
+# the later ones are not, for no reason visible in their output.
+#
+# That is not a bug in ArgoCD. It is attack-06 happening to you: this project
+# argues that the cluster must match git, and the policy mode IS cluster
+# state, so the honest way to change it is a commit.
+#
+# This block does not disable anything. It warns, because a tool that silently
+# loses its effect three minutes later is worse than one that says so.
+# ===========================================================================
+warn_if_selfheal() {
+  local sh
+  sh="$(kubectl -n argocd get app kyverno-policies \
+        -o jsonpath='{.spec.syncPolicy.automated.selfHeal}' 2>/dev/null || true)"
+  [[ "$sh" != "true" ]] && return 0
+  warn ""
+  warn "ARGOCD WILL REVERT THIS. kyverno-policies has selfHeal: true, and git"
+  warn "declares validationFailureAction: Audit. This patch survives until the"
+  warn "next reconciliation (~3 min), which is shorter than an attack run."
+  warn ""
+  warn "To make it stick, change the declared state instead:"
+  warn "    sed -i 's/validationFailureAction: Audit/validationFailureAction: Enforce/' \\"
+  warn "        policies/kyverno/*.yaml"
+  warn "    git commit -am 'policy: switch Kyverno to Enforce' && git push"
+  warn "    kubectl -n argocd patch app kyverno-policies --type merge \\"
+  warn "        -p '{\"operation\":{\"sync\":{}}}'          # or just wait 3 min"
+  warn ""
+  warn "Then confirm with:  ./scripts/policy-mode.sh"
+  warn ""
+}
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 
 report() {
@@ -55,6 +93,7 @@ case "${1:-report}" in
     ;;
 
   enforce|Enforce|ENFORCE)
+    warn_if_selfheal
     hdr "Reviewing reports before switching to Enforce"
     # ---------------------------------------------------------------------
     # Printed, not gated on. The failing results are supposed to include the
