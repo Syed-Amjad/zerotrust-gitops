@@ -177,16 +177,47 @@ log "Confirming the CNI plugin wrote its config where k3s will read it"
 # Asserted rather than assumed. This is the cheap check for setting 2; the
 # functional check is 03-verify-enforcement.sh and it is not optional.
 CNI_CONF_DIR=/var/lib/rancher/k3s/agent/etc/cni/net.d
-if sudo ls "$CNI_CONF_DIR" 2>/dev/null | grep -q istio; then
-  ok "istio-cni config present in $CNI_CONF_DIR"
+CNI_BIN_DIR=/var/lib/rancher/k3s/data/current/bin
+
+# TEST THE CONTENTS, NOT THE FILENAMES.
+#
+# An earlier version of this check ran `ls "$CNI_CONF_DIR" | grep -q istio`,
+# and that is wrong in Istio's DEFAULT configuration. In chained mode
+# (cni.chained=true, the default) istio-cni does not write a file of its own:
+# it edits the conflist k3s already placed there - on k3s that is
+# 10-flannel.conflist - and appends itself to the `plugins` array. A fully
+# correct install therefore leaves NO filename containing "istio", and the
+# filename check fails on a healthy cluster.
+#
+# That matters more than a cosmetic bug. This gate exists to catch a silent
+# downgrade to no enforcement, and a gate that fires on a healthy cluster is
+# one an operator learns to ignore - at which point it protects nothing. So
+# the check now asserts the two things that have to be true:
+#
+#   1. some conflist in the dir NAMES istio-cni in its plugin chain
+#   2. the istio-cni binary is in the dir k3s loads plugins from
+#
+# Both, because either alone is satisfiable without redirection working: a
+# chained config pointing at a missing binary fails the pod, and a binary
+# nobody chained is never invoked.
+CHAINED="$(sudo grep -l istio-cni "$CNI_CONF_DIR"/* 2>/dev/null | head -1 || true)"
+BINARY_OK=no
+sudo test -f "$CNI_BIN_DIR/istio-cni" && BINARY_OK=yes
+
+if [[ -n "$CHAINED" && "$BINARY_OK" == "yes" ]]; then
+  ok "istio-cni chained into $(basename "$CHAINED")"
+  ok "istio-cni binary present in $CNI_BIN_DIR"
   sudo ls -l "$CNI_CONF_DIR" | sed 's/^/    /'
+  sudo cat "$CHAINED" | jq -r '.plugins[]?.type' 2>/dev/null     | sed 's/^/    plugin: /' || true
 else
-  warn "No istio file in $CNI_CONF_DIR"
+  [[ -z "$CHAINED"           ]] && warn "No file in $CNI_CONF_DIR names istio-cni"
+  [[ "$BINARY_OK" != "yes"   ]] && warn "No istio-cni binary in $CNI_BIN_DIR"
   warn "Sidecars will be injected and traffic will NOT be redirected through"
   warn "them. mTLS, AuthorizationPolicy and REGISTRY_ONLY will all silently"
-  warn "do nothing. Check the paths in this script against:"
-  warn "    sudo ls /var/lib/rancher/k3s/agent/etc/cni/net.d"
-  warn "    sudo ls /var/lib/rancher/k3s/data/current/bin | head"
+  warn "do nothing."
+  warn ""
+  warn "Run the diagnostic - it is read-only and prints the real paths:"
+  warn "    ./scripts/00a-diagnose-cni.sh"
   die  "Refusing to continue - every mesh guarantee below depends on this."
 fi
 
