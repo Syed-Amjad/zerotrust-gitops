@@ -1,0 +1,58 @@
+
+[1;37m============================================================[0m
+[1;37m  ATTACK 5 — Exfiltration to an undeclared host[0m
+[1;37m============================================================[0m
+  layer under test : 6 — Istio REGISTRY_ONLY + ServiceEntry, over 5 — NetworkPolicy
+  expected outcome : DECLARED host reachable; everything else refused by the sidecar
+
+[1;36m==> Mesh outbound policy[0m
+[1;32m    REGISTRY_ONLY — undeclared destinations are refused[0m
+
+[1;36m==> 1. The DECLARED destination — must SUCCEED[0m
+      api.github.com is the only external host in istio/03-egress-allowlist.yaml
+[2m    ------------------------------------------------------------[0m
+      REACHED  status=200  body=Avoid administrative distraction.
+[2m    ------------------------------------------------------------[0m
+[1;32m    Reachable, as declared[0m
+      This half matters as much as the blocks below. An egress policy that
+      refuses everything is indistinguishable from a broken network, and
+      would make every result in this script meaningless.
+
+[1;36m==> 2. An UNDECLARED destination — must be BLOCKED[0m
+[2m    ------------------------------------------------------------[0m
+      https://example.com/                       BLOCKED  ConnectError: 
+      https://pastebin.com/raw/abc123            BLOCKED  ConnectError: 
+[2m    ------------------------------------------------------------[0m
+[1;32m    2/2 undeclared destinations reported BLOCKED[0m
+      The refusal comes from web's OWN sidecar, outbound, before a packet
+      leaves the pod. Nothing was sent anywhere, so there is no DNS query and
+      no TCP connection for a network monitor to notice — which is the
+      argument for enforcing egress at the workload rather than at the edge.
+
+[1;36m==> 3. The cloud metadata endpoint — three independent controls[0m
+      169.254.169.254 is where an SSRF goes first. Against IMDSv1 one request
+      returns the instance role credentials.
+[2m    ------------------------------------------------------------[0m
+      http://169.254.169.254/latest/meta-data/   REACHED  status=502  body=
+      https://169.254.169.254/latest/meta-data/  BLOCKED  ConnectError: 
+[2m    ------------------------------------------------------------[0m
+      Three reasons this fails, and all three are real and independent:
+      
+        1. Istio REGISTRY_ONLY — not a declared destination.
+        2. NetworkPolicy — network/04-allow-https-egress.yaml excludes
+           169.254.0.0/16 from its 0.0.0.0/0 allowance, so the packet is
+           dropped by the CNI even with the mesh out of the way. Plaintext
+           port 80 is not permitted outbound at all, which is why the http://
+           variant above is refused for a second, different reason.
+        3. The instance — terraform sets IMDSv2 required with
+           http_put_response_hop_limit = 1, so a response cannot be forwarded
+           out of the pod's network namespace. And no IAM role is attached to
+           the instance at all, so there would be nothing to read.
+      
+      Removing them one at a time is how you find out which ones are actually
+      load-bearing. Doing that is a worthwhile exercise and it is NOT what
+      this script does — it would leave the cluster in a weakened state that
+      a later attack would then silently pass through.
+
+[1;32m  >>> CONTROL HELD — declared egress works, undeclared egress and metadata are refused[0m
+

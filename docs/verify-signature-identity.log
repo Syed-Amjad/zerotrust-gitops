@@ -1,0 +1,65 @@
+
+[1;36m==> zt-api  sha256:d6a3db3d3e0330b0294dd56bfe62a742e6179cfb25eefc9ec26fa1d558f28f07[0m
+[2m    ------------------------------------------------------------[0m
+      1. correct identity (must SUCCEED)
+[1;32m    verified[0m
+      subject : https://github.com/Syed-Amjad/supply-chain-app/.github/workflows/build-sign.yml@refs/heads/main
+      issuer  : https://token.actions.githubusercontent.com
+      logIndex: 3274429468
+      logIndex is the entry number in the public Rekor transparency log.
+      It is what makes a backdated signature detectable: an attacker
+      cannot insert an entry before one that is already there.
+[2m    ------------------------------------------------------------[0m
+      2. wrong identity, same repo and branch (must FAIL)
+[1;32m    refused, as required[0m
+      Error: no matching signatures: none of the expected identities matched what was in the certificate, got subjects [https://github.com/Syed-Amjad/supply-chain-app/.github/workflows/build-sign.yml@refs/heads/main] with issuer https://token.actions.githubusercontent.com
+      main.go:69: error during command execution: no matching signatures: none of the expected identities matched what was in the certificate, got subjects [https://github.com/Syed-Amjad/supply-chain-app/.github/workflows/build-sign.yml@refs/heads/main] with issuer https://token.actions.githubusercontent.com
+      Same registry, same digest, same repository, same branch — and a
+      different workflow file. Refused. THAT is the claim: an attacker
+      who steals a GHCR token can push any bytes they like and cannot
+      produce a Fulcio certificate naming this workflow.
+[2m    ------------------------------------------------------------[0m
+      3. the SBOM attestation
+[1;32m    SBOM attestation verifies, bound to the same identity and digest[0m
+      packages in the SBOM: 116
+      An attestation is a SIGNED STATEMENT ABOUT the image, not a
+      signature OF it — so the SBOM cannot be swapped for one describing
+      a different, cleaner image.
+
+
+[1;36m==> zt-web  sha256:636fb7f091c5e24690f17ce144df6105e45897cec194c7b6129c534a03b5ca1b[0m
+[2m    ------------------------------------------------------------[0m
+      1. correct identity (must SUCCEED)
+[1;32m    verified[0m
+      subject : https://github.com/Syed-Amjad/supply-chain-app/.github/workflows/build-sign.yml@refs/heads/main
+      issuer  : https://token.actions.githubusercontent.com
+      logIndex: 3274432628
+      logIndex is the entry number in the public Rekor transparency log.
+      It is what makes a backdated signature detectable: an attacker
+      cannot insert an entry before one that is already there.
+[2m    ------------------------------------------------------------[0m
+      2. wrong identity, same repo and branch (must FAIL)
+[1;32m    refused, as required[0m
+      Error: no matching signatures: none of the expected identities matched what was in the certificate, got subjects [https://github.com/Syed-Amjad/supply-chain-app/.github/workflows/build-sign.yml@refs/heads/main] with issuer https://token.actions.githubusercontent.com
+      main.go:69: error during command execution: no matching signatures: none of the expected identities matched what was in the certificate, got subjects [https://github.com/Syed-Amjad/supply-chain-app/.github/workflows/build-sign.yml@refs/heads/main] with issuer https://token.actions.githubusercontent.com
+      Same registry, same digest, same repository, same branch — and a
+      different workflow file. Refused. THAT is the claim: an attacker
+      who steals a GHCR token can push any bytes they like and cannot
+      produce a Fulcio certificate naming this workflow.
+[2m    ------------------------------------------------------------[0m
+      3. the SBOM attestation
+[1;32m    SBOM attestation verifies, bound to the same identity and digest[0m
+      packages in the SBOM: 119
+      An attestation is a SIGNED STATEMENT ABOUT the image, not a
+      signature OF it — so the SBOM cannot be swapped for one describing
+      a different, cleaner image.
+
+
+[1;36m==> What this does not prove[0m
+      A verified signature says the artifact came from this pipeline. It says
+      nothing about whether the pipeline produced something safe — a signed
+      image containing a vulnerable dependency is signed, correctly.
+      
+      That is the scan gate's job, and the reason the CI workflow signs AFTER
+      scanning rather than before. The order makes the signature mean 'built
+      here AND passed the gate' instead of just 'built here'.
