@@ -34,16 +34,22 @@ log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 # k3s's containerd config is the authority. The fallback probes for `flannel`,
 # because flannel is the plugin k3s itself installed and uses - wherever it
 # resolves from is, by definition, where containerd looks.
-CONF_DIR="$(sudo grep -ho 'conf_dir *= *"[^"]*"' \
-    /var/lib/rancher/k3s/agent/etc/containerd/config.toml* 2>/dev/null \
-    | head -1 | sed 's/.*= *"//; s/".*//')"
-[ -n "${CONF_DIR:-}" ] && sudo test -d "$CONF_DIR" \
-  || CONF_DIR=/var/lib/rancher/k3s/agent/etc/cni/net.d
+# `grep -r` on the DIRECTORY, not a glob below it: a glob is expanded by this
+# unprivileged shell and /var/lib/rancher/k3s is 0700 root, so it would match
+# nothing and the literal * would reach grep. `|| true` because a miss is
+# expected and `head -1` can SIGPIPE the grep.
+CTR_DIR=/var/lib/rancher/k3s/agent/etc/containerd
 
-BIN_DIR="$(sudo grep -ho 'bin_dir *= *"[^"]*"' \
-    /var/lib/rancher/k3s/agent/etc/containerd/config.toml* 2>/dev/null \
-    | head -1 | sed 's/.*= *"//; s/".*//')"
+CONF_DIR="$(sudo grep -rho 'conf_dir *= *"[^"]*"' "$CTR_DIR" 2>/dev/null \
+    | head -1 | sed 's/.*= *"//; s/".*//' || true)"
+if [ -z "${CONF_DIR:-}" ] || ! sudo test -d "$CONF_DIR"; then
+  CONF_DIR=/var/lib/rancher/k3s/agent/etc/cni/net.d
+fi
+
+BIN_DIR="$(sudo grep -rho 'bin_dir *= *"[^"]*"' "$CTR_DIR" 2>/dev/null \
+    | head -1 | sed 's/.*= *"//; s/".*//' || true)"
 if [ -z "${BIN_DIR:-}" ] || ! sudo test -x "$BIN_DIR/flannel"; then
+  BIN_DIR=""
   for d in /var/lib/rancher/k3s/data/cni \
            /var/lib/rancher/k3s/data/current/bin \
            /opt/cni/bin; do

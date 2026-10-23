@@ -127,16 +127,33 @@ C="$(kubectl get pods -A --no-headers 2>/dev/null | awk '$4!="Running" && $4!="C
 info "$C pod(s) not Running"
 
 log "Verdict"
+# This used to test exhaustion only, so it printed "IPAM is not the problem"
+# directly underneath section 1 reporting 113 leaked leases. A summary that
+# contradicts the evidence above it is worse than no summary - the reader
+# believes the summary. Every branch here now matches what section 1 said.
 if [ "$LEASES" -ge 250 ]; then
-  bad "IPAM pool exhausted. Reclaim it:  ./scripts/00c-repair-cni-leases.sh"
+  bad "IPAM pool EXHAUSTED ($LEASES / 254). Reclaim it:"
+  info "    ./scripts/00c-repair-cni-leases.sh"
   info "That script is destructive to running pods and safe for this lab -"
   info "everything on the node was installed from git by 00/01/02."
-  info ""
-  info "Fix the CAUSE too, or it refills. If section 2 named a plugin"
-  info "failure, that is the cause. If it did not, the trigger was a pod"
-  info "that could not start for an unrelated reason and then retried itself"
-  info "into exhaustion - find it in section 5."
+  NEEDS_CAUSE=yes
+elif [ "$LEAK" -gt 20 ]; then
+  bad "$LEAK of $LEASES leases belong to no pod. Not fatal yet - the pool"
+  info "holds 254 - but these never come back on their own, and the next"
+  info "burst of failures starts from $LEASES instead of from zero."
+  info "    ./scripts/00c-repair-cni-leases.sh"
+  NEEDS_CAUSE=yes
 else
-  ok "IPAM is not the problem right now"
+  ok "$LEASES leases, $PODS pods - IPAM is healthy"
+  NEEDS_CAUSE=no
+fi
+
+if [ "$NEEDS_CAUSE" = yes ]; then
+  info ""
+  info "AND FIX THE CAUSE, or it refills. If section 2 named a plugin"
+  info "failure, that is the cause - reclaiming leases does not address it."
+  info "If section 2 was empty, the trigger was a pod that could not start"
+  info "for an unrelated reason and then retried itself into exhaustion;"
+  info "find it in section 5."
 fi
 exit 0

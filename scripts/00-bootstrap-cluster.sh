@@ -102,20 +102,36 @@ cosign version 2>/dev/null | head -3 || true
 # resolves plugin names. Probing is the fallback, and it probes for `flannel`
 # specifically: flannel is the plugin k3s itself installed and uses, so the
 # directory holding it is by definition the directory containerd searches.
+# TWO THINGS IN HERE WERE WRONG ON THE FIRST ATTEMPT. Both are marked, because
+# both are easy to write again.
 detect_cni_dirs() {
-  CNI_BIN_DIR="$(sudo grep -ho 'bin_dir *= *"[^"]*"' \
-      /var/lib/rancher/k3s/agent/etc/containerd/config.toml* 2>/dev/null \
-      | head -1 | sed 's/.*= *"//; s/".*//')"
+  local cdir=/var/lib/rancher/k3s/agent/etc/containerd
+
+  # (1) `grep -r` ON THE DIRECTORY, never `"$cdir"/config.toml*`. A glob is
+  # expanded by THIS shell, which is unprivileged, and /var/lib/rancher/k3s is
+  # 0700 root - so the glob matches nothing, the literal * reaches grep, and
+  # grep fails. Exactly the trap that made the conflist check report a missing
+  # istio-cni on a healthy node, written a second time in the fix for it.
+  #
+  # (2) `|| true` ON EVERY SUBSTITUTION. A miss here is expected, and `head -1`
+  # closes the pipe early so grep can take SIGPIPE even on a hit. Under
+  # `set -euo pipefail` a failing pipeline inside a command substitution aborts
+  # the script - and because the failure is an assignment, bash prints NOTHING.
+  # The first version of this function exited the bootstrap silently, right
+  # after printing its own log line, with the exit status of a grep nobody saw.
+  CNI_BIN_DIR="$(sudo grep -rho 'bin_dir *= *"[^"]*"' "$cdir" 2>/dev/null \
+      | head -1 | sed 's/.*= *"//; s/".*//' || true)"
   if [ -z "${CNI_BIN_DIR:-}" ] || ! sudo test -x "$CNI_BIN_DIR/flannel"; then
+    CNI_BIN_DIR=""
     for d in /var/lib/rancher/k3s/data/cni \
              /var/lib/rancher/k3s/data/current/bin \
              /opt/cni/bin; do
       if sudo test -x "$d/flannel"; then CNI_BIN_DIR="$d"; break; fi
     done
   fi
-  CNI_CONF_DIR="$(sudo grep -ho 'conf_dir *= *"[^"]*"' \
-      /var/lib/rancher/k3s/agent/etc/containerd/config.toml* 2>/dev/null \
-      | head -1 | sed 's/.*= *"//; s/".*//')"
+
+  CNI_CONF_DIR="$(sudo grep -rho 'conf_dir *= *"[^"]*"' "$cdir" 2>/dev/null \
+      | head -1 | sed 's/.*= *"//; s/".*//' || true)"
   if [ -z "${CNI_CONF_DIR:-}" ] || ! sudo test -d "$CNI_CONF_DIR"; then
     CNI_CONF_DIR=/var/lib/rancher/k3s/agent/etc/cni/net.d
   fi
