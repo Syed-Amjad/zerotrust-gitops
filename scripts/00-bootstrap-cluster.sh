@@ -95,13 +95,48 @@ cosign version 2>/dev/null | head -3 || true
 # ===========================================================================
 # ISTIO. Three settings here carry the entire mesh half of this project.
 # ===========================================================================
+# DISCOVER the CNI directories. Do not hardcode them. See SETTING 2 below for
+# what hardcoding them cost.
+#
+# The authority is k3s's own containerd configuration, which is what actually
+# resolves plugin names. Probing is the fallback, and it probes for `flannel`
+# specifically: flannel is the plugin k3s itself installed and uses, so the
+# directory holding it is by definition the directory containerd searches.
+detect_cni_dirs() {
+  CNI_BIN_DIR="$(sudo grep -ho 'bin_dir *= *"[^"]*"' \
+      /var/lib/rancher/k3s/agent/etc/containerd/config.toml* 2>/dev/null \
+      | head -1 | sed 's/.*= *"//; s/".*//')"
+  if [ -z "${CNI_BIN_DIR:-}" ] || ! sudo test -x "$CNI_BIN_DIR/flannel"; then
+    for d in /var/lib/rancher/k3s/data/cni \
+             /var/lib/rancher/k3s/data/current/bin \
+             /opt/cni/bin; do
+      if sudo test -x "$d/flannel"; then CNI_BIN_DIR="$d"; break; fi
+    done
+  fi
+  CNI_CONF_DIR="$(sudo grep -ho 'conf_dir *= *"[^"]*"' \
+      /var/lib/rancher/k3s/agent/etc/containerd/config.toml* 2>/dev/null \
+      | head -1 | sed 's/.*= *"//; s/".*//')"
+  if [ -z "${CNI_CONF_DIR:-}" ] || ! sudo test -d "$CNI_CONF_DIR"; then
+    CNI_CONF_DIR=/var/lib/rancher/k3s/agent/etc/cni/net.d
+  fi
+}
+
+log "Discovering the CNI directories containerd actually uses"
+detect_cni_dirs
+[ -n "${CNI_BIN_DIR:-}" ] || die "Could not find the directory holding the flannel CNI plugin.
+    Look for it:  sudo find /var/lib/rancher /opt/cni -name flannel -type f 2>/dev/null
+    Then re-run:  CNI_BIN_DIR=<that dir> $0"
+ok "plugin binaries: $CNI_BIN_DIR"
+ok "plugin config:   $CNI_CONF_DIR"
+sudo ls "$CNI_BIN_DIR" 2>/dev/null | tr '\n' ' ' | fold -w 100 -s | sed 's/^/    /'
+
 log "Installing Istio ${ISTIO_VERSION} with CNI and REGISTRY_ONLY egress"
 
 istioctl install -y \
   --set profile=default \
   --set components.cni.enabled=true \
-  --set values.cni.cniBinDir=/var/lib/rancher/k3s/data/current/bin \
-  --set values.cni.cniConfDir=/var/lib/rancher/k3s/agent/etc/cni/net.d \
+  --set values.cni.cniBinDir="$CNI_BIN_DIR" \
+  --set values.cni.cniConfDir="$CNI_CONF_DIR" \
   --set meshConfig.outboundTrafficPolicy.mode=REGISTRY_ONLY \
   --set meshConfig.accessLogFile=/dev/stdout
 
@@ -122,16 +157,45 @@ istioctl install -y \
 # and the injected pod needs no capabilities at all.
 #
 # ---------------------------------------------------------------------------
-# SETTING 2 — THE K3S CNI PATHS. The most dangerous line in this repository.
+# SETTING 2 — THE K3S CNI PATHS. The most dangerous line in this repository,
+# and it was wrong. This entry is the corrected version; read it before
+# touching the paths.
 #
-# Istio's CNI defaults are /opt/cni/bin and /etc/cni/net.d. k3s uses NEITHER:
+# Istio's CNI defaults are /opt/cni/bin and /etc/cni/net.d. k3s uses neither,
+# and WHICH directory it uses depends on the k3s version:
 #
-#   binaries  /var/lib/rancher/k3s/data/current/bin
-#   config    /var/lib/rancher/k3s/agent/etc/cni/net.d
+#   k3s 1.36.5   binaries  /var/lib/rancher/k3s/data/cni
+#   earlier      binaries  /var/lib/rancher/k3s/data/current/bin
+#   both         config    /var/lib/rancher/k3s/agent/etc/cni/net.d
 #
-# Leave the defaults and the istio-cni DaemonSet starts, reports Running,
-# reports Ready, and writes its configuration into a directory that nothing
-# reads. Then:
+# This script used to hardcode `data/current/bin`. On k3s v1.36.5 that
+# directory still EXISTS and still contains plugins, so every check that the
+# binary had landed passed — while containerd was resolving plugin names
+# against /var/lib/rancher/k3s/data/cni, where istio-cni was not. The result
+# was far worse than the silent downgrade described below:
+#
+#   plugin type="istio-cni" failed (add):
+#   failed to find plugin "istio-cni" in path [/var/lib/rancher/k3s/data/cni]
+#
+# istio-cni was correctly CHAINED into 10-flannel.conflist and the binary was
+# unreachable, so every CNI ADD on the node failed — not just mesh pods. And
+# because flannel allocates the address before the chain reaches istio-cni,
+# each of the kubelet's retries leaked one host-local lease. 254 retries later
+# the pool was empty and every pod on the node was failing with
+# `no IP addresses available`, an error that names flannel and points nowhere
+# near the cause. One wrong path took out the whole node 14 minutes later.
+#
+# So the paths are now DISCOVERED from k3s's containerd config, with a probe
+# for the flannel binary as the fallback — flannel is the plugin k3s itself
+# uses, so wherever it lives is where containerd looks. Hardcoding a path that
+# moves between minor versions was the actual defect; the old comment below
+# even predicted it would move and still left the value hardcoded.
+#
+# The silent-downgrade failure mode described next is still real, and is what
+# happens when the CONFIG directory is wrong rather than the binary directory.
+# Leave the config path wrong and the istio-cni DaemonSet starts, reports
+# Running, reports Ready, and writes its configuration into a directory that
+# nothing reads. Then:
 #
 #   * pods are admitted (no init container, so PSA is satisfied)
 #   * the sidecar is injected and runs
@@ -181,8 +245,10 @@ kubectl -n istio-system get pods
 log "Confirming the CNI plugin wrote its config where k3s will read it"
 # Asserted rather than assumed. This is the cheap check for setting 2; the
 # functional check is 03-verify-enforcement.sh and it is not optional.
-CNI_CONF_DIR=/var/lib/rancher/k3s/agent/etc/cni/net.d
-CNI_BIN_DIR=/var/lib/rancher/k3s/data/current/bin
+# Re-detect rather than reuse: istioctl install can take minutes and a check
+# that reads back the same variable it wrote only proves the variable, never
+# the filesystem.
+detect_cni_dirs
 
 # TEST THE CONTENTS, NOT THE FILENAMES.
 #
@@ -221,15 +287,64 @@ if [[ -n "$CHAINED" && "$BINARY_OK" == "yes" ]]; then
   sudo ls -l "$CNI_CONF_DIR" | sed 's/^/    /'
   sudo cat "$CHAINED" | jq -r '.plugins[]?.type' 2>/dev/null     | sed 's/^/    plugin: /' || true
 else
-  [[ -z "$CHAINED"           ]] && warn "No file in $CNI_CONF_DIR names istio-cni"
-  [[ "$BINARY_OK" != "yes"   ]] && warn "No istio-cni binary in $CNI_BIN_DIR"
-  warn "Sidecars will be injected and traffic will NOT be redirected through"
-  warn "them. mTLS, AuthorizationPolicy and REGISTRY_ONLY will all silently"
-  warn "do nothing."
+  [[ -z "$CHAINED" ]] && warn "No file in $CNI_CONF_DIR names istio-cni"
+  if [[ "$BINARY_OK" != "yes" ]]; then
+    warn "No istio-cni binary in $CNI_BIN_DIR - the directory containerd searches."
+    # Name this case explicitly. It is the one that cost a node: the binary is
+    # present somewhere plausible, so "did it install?" answers yes, while
+    # containerd resolves names against a different directory and fails every
+    # ADD on the node - mesh pods and non-mesh pods alike.
+    OTHER="$(sudo find /var/lib/rancher /opt/cni -name 'istio-cni' -type f 2>/dev/null \
+             | grep -v "^$CNI_BIN_DIR/" | head -3 || true)"
+    if [[ -n "$OTHER" ]]; then
+      warn ""
+      warn "IT IS PRESENT ELSEWHERE, which is worse than absent:"
+      echo "$OTHER" | sed 's/^/      /'
+      warn "containerd resolves plugin names only under $CNI_BIN_DIR, so every"
+      warn "CNI ADD on this node will fail with:"
+      warn "    failed to find plugin \"istio-cni\" in path [$CNI_BIN_DIR]"
+      warn "and each failed retry leaks one host-local address lease. After"
+      warn "~254 retries every pod on the node fails with 'no IP addresses"
+      warn "available', which names flannel and points nowhere near this."
+    fi
+  fi
   warn ""
   warn "Run the diagnostic - it is read-only and prints the real paths:"
   warn "    ./scripts/00a-diagnose-cni.sh"
   die  "Refusing to continue - every mesh guarantee below depends on this."
+fi
+
+# ---------------------------------------------------------------------------
+# THE FUNCTIONAL CHECK. The two assertions above read the filesystem, and both
+# of them passed on the run that took the node down - the binary was where
+# they looked, just not where containerd looked. The only check that cannot be
+# fooled by a path is starting a pod and seeing whether it gets an address.
+# ---------------------------------------------------------------------------
+log "Can a brand-new pod actually get an IP through this chain?"
+kubectl delete pod cni-canary --ignore-not-found --force --grace-period=0 >/dev/null 2>&1 || true
+kubectl run cni-canary --image=registry.k8s.io/pause:3.10 --restart=Never >/dev/null 2>&1 \
+  || warn "could not create the canary pod"
+
+CANARY_IP=""
+for _ in $(seq 1 30); do
+  CANARY_IP="$(kubectl get pod cni-canary -o jsonpath='{.status.podIP}' 2>/dev/null || true)"
+  [ -n "$CANARY_IP" ] && break
+  sleep 2
+done
+
+if [ -n "$CANARY_IP" ]; then
+  ok "canary pod got $CANARY_IP - the CNI chain works end to end"
+  kubectl delete pod cni-canary --force --grace-period=0 >/dev/null 2>&1 || true
+else
+  warn "A new pod could NOT get an address in 60s. Events:"
+  kubectl describe pod cni-canary 2>/dev/null | sed -n '/Events:/,$p' \
+    | fold -w 108 -s | sed 's/^/      /'
+  warn ""
+  warn "STOP HERE. Do not retry in a loop - every failed sandbox leaks an"
+  warn "address lease, and ~254 of them exhausts the node's whole /24."
+  kubectl delete pod cni-canary --force --grace-period=0 >/dev/null 2>&1 || true
+  warn "    ./scripts/00b-diagnose-pod-network.sh    # names the real cause"
+  die  "Refusing to continue - pod networking is broken."
 fi
 
 log "Verifying REGISTRY_ONLY actually landed in the mesh config"

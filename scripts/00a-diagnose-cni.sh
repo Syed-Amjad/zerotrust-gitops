@@ -23,8 +23,34 @@ bad()  { printf '\033[1;31m  FAIL  %s\033[0m\n' "$*"; }
 info() { printf '        %s\n' "$*"; }
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
-CONF_DIR=/var/lib/rancher/k3s/agent/etc/cni/net.d
-BIN_DIR=/var/lib/rancher/k3s/data/current/bin
+# DISCOVERED, not hardcoded. An earlier version of this script hardcoded
+# BIN_DIR=/var/lib/rancher/k3s/data/current/bin and reported PASS for the
+# binary while containerd was resolving plugin names under
+# /var/lib/rancher/k3s/data/cni, where istio-cni was absent. Both directories
+# exist on k3s v1.36.5 and both contain plugins, so the check was green and
+# every CNI ADD on the node was failing. A diagnostic that asserts against a
+# path of its own choosing is not diagnosing anything.
+#
+# k3s's containerd config is the authority. The fallback probes for `flannel`,
+# because flannel is the plugin k3s itself installed and uses - wherever it
+# resolves from is, by definition, where containerd looks.
+CONF_DIR="$(sudo grep -ho 'conf_dir *= *"[^"]*"' \
+    /var/lib/rancher/k3s/agent/etc/containerd/config.toml* 2>/dev/null \
+    | head -1 | sed 's/.*= *"//; s/".*//')"
+[ -n "${CONF_DIR:-}" ] && sudo test -d "$CONF_DIR" \
+  || CONF_DIR=/var/lib/rancher/k3s/agent/etc/cni/net.d
+
+BIN_DIR="$(sudo grep -ho 'bin_dir *= *"[^"]*"' \
+    /var/lib/rancher/k3s/agent/etc/containerd/config.toml* 2>/dev/null \
+    | head -1 | sed 's/.*= *"//; s/".*//')"
+if [ -z "${BIN_DIR:-}" ] || ! sudo test -x "$BIN_DIR/flannel"; then
+  for d in /var/lib/rancher/k3s/data/cni \
+           /var/lib/rancher/k3s/data/current/bin \
+           /opt/cni/bin; do
+    if sudo test -x "$d/flannel"; then BIN_DIR="$d"; break; fi
+  done
+fi
+BIN_DIR="${BIN_DIR:-/var/lib/rancher/k3s/data/cni}"
 fails=0
 
 log "k3s version and the real data dir"
@@ -77,11 +103,24 @@ if sudo test -f "$BIN_DIR/istio-cni"; then
   ok "$BIN_DIR/istio-cni"
   sudo ls -l "$BIN_DIR/istio-cni" | sed 's/^/        /'
 else
-  bad "$BIN_DIR/istio-cni missing"
+  bad "$BIN_DIR/istio-cni missing - and that is the dir containerd searches"
   info "what IS in that dir:"
   sudo ls "$BIN_DIR" 2>/dev/null | head -20 | sed 's/^/          /' || info "          (dir unreadable)"
-  info "and anywhere on the box:"
-  sudo find /var/lib/rancher /opt/cni -name 'istio-cni*' 2>/dev/null | sed 's/^/          /' || true
+  ELSEWHERE="$(sudo find /var/lib/rancher /opt/cni -name 'istio-cni' -type f 2>/dev/null \
+               | grep -v "^$BIN_DIR/" || true)"
+  if [ -n "$ELSEWHERE" ]; then
+    info ""
+    bad "it IS present elsewhere, which is worse than absent:"
+    echo "$ELSEWHERE" | sed 's/^/          /'
+    info "The binary installed fine; it is just not on the path containerd"
+    info "resolves names against. Every CNI ADD on this node fails with"
+    info "  failed to find plugin \"istio-cni\" in path [$BIN_DIR]"
+    info "and each failed retry leaks one host-local lease, so ~254 retries"
+    info "later every pod fails with 'no IP addresses available' instead -"
+    info "an error that names flannel and points nowhere near the cause."
+    info "Fix: re-run ./scripts/00-bootstrap-cluster.sh, which now DISCOVERS"
+    info "this directory instead of hardcoding it."
+  fi
   fails=$((fails+1))
 fi
 
@@ -106,6 +145,9 @@ if [ "$fails" -eq 0 ]; then
   ok "CNI looks correctly installed. Re-run ./scripts/00-bootstrap-cluster.sh"
   info "The cheap check is not proof - 03-verify-enforcement.sh is the real test."
 else
-  bad "$fails of 3 checks failed. Do NOT continue to 01 - paste this output."
+  bad "$fails check(s) failed. Do NOT continue to 01 - paste this output."
+  info "This script is read-only, so it reads paths and files. The check that"
+  info "cannot be fooled by a path is starting a pod and seeing whether it"
+  info "gets an address - 00-bootstrap-cluster.sh does that at the end."
 fi
 exit 0
