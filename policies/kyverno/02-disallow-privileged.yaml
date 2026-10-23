@@ -27,7 +27,7 @@ metadata:
     policies.kyverno.io/category: Pod Security
     policies.kyverno.io/severity: critical
 spec:
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   failurePolicy: Fail
   # Pure validation with no registry calls, so background scanning works — and
   # is wanted here. It means existing pods are re-evaluated on a timer and

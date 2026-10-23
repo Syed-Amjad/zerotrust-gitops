@@ -22,7 +22,7 @@ metadata:
     policies.kyverno.io/category: Workload Management
     policies.kyverno.io/severity: medium
 spec:
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   failurePolicy: Fail
   background: true
 

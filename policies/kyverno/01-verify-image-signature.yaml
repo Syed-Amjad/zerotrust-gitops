@@ -38,7 +38,7 @@ spec:
   # Enforce is a separate, deliberate step in BUILD-STEPS.md, taken after the
   # reports come back clean.
   # -------------------------------------------------------------------------
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
 
   # -------------------------------------------------------------------------
   # 30s, the maximum Kubernetes allows, and the default of 10 is not enough.

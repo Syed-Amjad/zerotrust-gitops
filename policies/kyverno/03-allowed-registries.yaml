@@ -17,7 +17,7 @@ metadata:
     policies.kyverno.io/category: Supply Chain
     policies.kyverno.io/severity: high
 spec:
-  validationFailureAction: Audit
+  validationFailureAction: Enforce
   failurePolicy: Fail
   background: true
 
