@@ -41,6 +41,21 @@ sudo chown "$(id -u):$(id -g)" ~/.kube/config
 export KUBECONFIG=~/.kube/config
 grep -q 'KUBECONFIG' ~/.bashrc || echo 'export KUBECONFIG=~/.kube/config' >> ~/.bashrc
 
+log "Waiting for the k3s node to register"
+# `kubectl wait --all` does NOT wait for a resource to exist. k3s registers
+# its node a few seconds AFTER systemd reports the service started, and in
+# that window --all resolves to an empty set, so kubectl exits 1 immediately
+# with "error: no matching resources found" instead of waiting. Under
+# `set -e` that killed this script here, before Istio was installed - and the
+# message names no resource and no timeout, so it reads like a kubeconfig
+# problem rather than a race.
+for _ in $(seq 1 60); do
+  [ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -gt 0 ] && break
+  sleep 2
+done
+[ "$(kubectl get nodes --no-headers 2>/dev/null | wc -l)" -gt 0 ] ||
+  die "k3s registered no node in 120s. Check: sudo journalctl -u k3s -n 50"
+
 kubectl wait --for=condition=Ready node --all --timeout=180s
 kubectl get nodes -o wide
 
