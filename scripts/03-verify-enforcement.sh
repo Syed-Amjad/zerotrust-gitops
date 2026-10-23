@@ -68,6 +68,67 @@ if [[ "$API_IMG" == *"$ZERO_DIGEST" ]]; then
 fi
 pass "Image under test: ${API_IMG##*/}"
 
+# ---------------------------------------------------------------------------
+# HAS THE CLUSTER BEEN HANDED OVER TO GIT YET?
+#
+# Every control this script tests - the namespaces, their Pod Security labels,
+# the five ClusterPolicies, the NetworkPolicies, the PeerAuthentication and
+# the ServiceEntry - is created by ArgoCD from the repo, not by scripts 00-02.
+# 02 ends by printing the two `kubectl apply` commands that start that, and
+# they are easy to skip because 02 reads like the last install step.
+#
+# Without this gate the run reported SIX failures across four different
+# layers, all of them saying a control was not enforcing, when the real
+# message was one line buried in the middle:
+#
+#   Error from server (NotFound): namespaces "zt-prod" not found
+#
+# Six red lines pointing at four subsystems is a worse diagnosis than one red
+# line pointing at a skipped step. Check the precondition instead.
+# ---------------------------------------------------------------------------
+if ! kubectl get ns zt-prod >/dev/null 2>&1; then
+  fail "The namespace zt-prod does not exist, so nothing here can be tested."
+  note ""
+  note "ArgoCD creates it, along with every other control this script checks."
+  note "02-install-argocd.sh installs ArgoCD but deliberately syncs nothing;"
+  note "the hand-over is these two commands, in this order - the AppProject"
+  note "must exist before an Application can reference it:"
+  note ""
+  note "    kubectl apply -f argocd/projects/zerotrust.yaml"
+  note "    kubectl apply -f argocd/root-app.yaml"
+  note "    watch -n2 'kubectl -n argocd get applications'"
+  note ""
+  note "Wait for waves 0-3 to report Synced, then re-run this script."
+  note "workloads (wave 4) stays unhealthy until CI writes real digests -"
+  note "that is expected and does not block the six checks here."
+  exit 1
+fi
+
+APPS="$(kubectl -n argocd get applications -o name 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "$APPS" == "0" ]]; then
+  fail "zt-prod exists but there are no ArgoCD Applications."
+  note "Something created the namespace outside git. Apply the root app:"
+  note "    kubectl apply -f argocd/projects/zerotrust.yaml"
+  note "    kubectl apply -f argocd/root-app.yaml"
+  exit 1
+fi
+pass "$APPS ArgoCD Application(s) present; zt-prod exists"
+
+# Synced is not the same as present. A wave that errored leaves its objects
+# missing while earlier waves look fine, and that produces exactly the
+# scattered failures this gate exists to prevent.
+UNSYNCED="$(kubectl -n argocd get applications \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"="}{.status.sync.status}{"\n"}{end}' \
+  2>/dev/null | grep -v '=Synced$' || true)"
+if [[ -n "$UNSYNCED" ]]; then
+  warn_count=$(printf '%s\n' "$UNSYNCED" | wc -l | tr -d ' ')
+  note "$warn_count Application(s) are not Synced:"
+  printf '%s\n' "$UNSYNCED" | sed 's/^/          /'
+  note "workloads being OutOfSync or Missing is expected before CI bumps the"
+  note "digests. Any of the others means the checks below may fail for that"
+  note "reason rather than for the reason they name."
+fi
+
 # A probe pod built to satisfy every control except the one being tested.
 # PSA restricted, read-only root, resources declared, signed image, allowed
 # registry — so a rejection can only come from the layer under test.
