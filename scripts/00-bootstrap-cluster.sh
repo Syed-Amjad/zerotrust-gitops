@@ -200,7 +200,13 @@ CNI_BIN_DIR=/var/lib/rancher/k3s/data/current/bin
 # Both, because either alone is satisfiable without redirection working: a
 # chained config pointing at a missing binary fails the pod, and a binary
 # nobody chained is never invoked.
-CHAINED="$(sudo grep -l istio-cni "$CNI_CONF_DIR"/* 2>/dev/null | head -1 || true)"
+# grep -r, NOT a glob. `sudo grep -l istio-cni "$CNI_CONF_DIR"/*` expands
+# the glob in the CALLING shell, which is unprivileged, and k3s sets
+# /var/lib/rancher/k3s to 0700 root. The glob matches nothing, the literal
+# * is passed to grep, grep fails into /dev/null, and the gate reports a
+# missing config on a cluster where it is present. sudo elevates the
+# command; it cannot elevate the shell that built the arguments.
+CHAINED="$(sudo grep -rl istio-cni "$CNI_CONF_DIR" 2>/dev/null | head -1 || true)"
 BINARY_OK=no
 sudo test -f "$CNI_BIN_DIR/istio-cni" && BINARY_OK=yes
 

@@ -31,6 +31,16 @@ log "k3s version and the real data dir"
 k3s --version 2>/dev/null | head -1
 info "data/current -> $(readlink -f /var/lib/rancher/k3s/data/current 2>/dev/null || echo '(no such symlink)')"
 
+log "0. Can the invoking user traverse these paths at all?"
+# If any of these is 0700 root, every shell glob an unprivileged user
+# writes against a path below it silently matches nothing.
+for d in /var/lib/rancher /var/lib/rancher/k3s \n         /var/lib/rancher/k3s/agent "$CONF_DIR"; do
+  printf '        %s
+' "$(ls -ld "$d" 2>&1)"
+done
+if [ -r "$CONF_DIR" ]; then info "readable by $(id -un) - globs work"
+else info "NOT readable by $(id -un) - globs below this path match nothing"; fi
+
 log "1. CNI config directory: $CONF_DIR"
 if sudo test -d "$CONF_DIR"; then
   sudo ls -l "$CONF_DIR" | sed 's/^/        /'
@@ -42,7 +52,13 @@ else
 fi
 
 log "2. Does any conflist NAME istio-cni? (this is the test that matters)"
-HITS="$(sudo grep -l istio-cni "$CONF_DIR"/* 2>/dev/null || true)"
+# `sudo grep -l PATTERN "$DIR"/*` DOES NOT WORK HERE. The glob is expanded
+# by the calling shell, which is unprivileged, and k3s sets
+# /var/lib/rancher/k3s to 0700 root - so the glob matches nothing, bash
+# passes the literal * through, and grep fails into /dev/null. sudo only
+# elevates the command, never the shell that built its arguments.
+# `grep -r DIR` does its own traversal, as root.
+HITS="$(sudo grep -rl istio-cni "$CONF_DIR" 2>/dev/null || true)"
 if [ -n "$HITS" ]; then
   ok "istio-cni is chained into:"
   echo "$HITS" | sed 's/^/        /'
