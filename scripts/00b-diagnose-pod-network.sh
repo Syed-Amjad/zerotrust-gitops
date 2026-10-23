@@ -60,11 +60,30 @@ log "2. THE FIRST FAILURE - everything after it may just be the cascade"
 # Exclude the exhaustion message to find what went wrong BEFORE the pool
 # emptied. If this section is empty, the leak started without a CNI error and
 # the cause is upstream of CNI (a crash-looping pod, or a kill mid-sandbox).
-FIRST="$(sudo journalctl -u k3s --no-pager --since '6 hours ago' 2>/dev/null \
-         | grep -F 'failed (add)' | grep -v 'no IP addresses available' | head -5)"
-if [ -n "$FIRST" ]; then
+# DO NOT TRUNCATE THESE LINES FROM THE LEFT. The first version of this script
+# printed `cut -c1-200`, and the informative part of a CNI error sits at the
+# END of the line - after the kubelet prefix, the error-wrapper text and a
+# 64-character sandbox id. The reason the plugin actually gave was cut off, so
+# the script located the trigger and then hid it. Extract the plugin clause.
+SINCE="${SINCE:-12 hours ago}"
+NONEXH="$(sudo journalctl -u k3s --no-pager --since "$SINCE" 2>/dev/null \
+          | grep -F 'failed (add)' | grep -v 'no IP addresses available' || true)"
+if [ -n "$NONEXH" ]; then
   bad "a non-exhaustion CNI failure came first:"
-  echo "$FIRST" | cut -c1-200 | sed 's/^/          /'
+  info "first occurrence: $(printf '%s\n' "$NONEXH" | head -1 | awk '{print $1, $2, $3}')"
+  info ""
+  info "distinct plugin errors, most frequent first:"
+  # Keep everything from `plugin type=` to end of line, with sed rather than a
+  # quote-aware regex: journald prints these inside err="...", so the inner
+  # quotes arrive backslash-escaped as \" and any pattern written against bare
+  # quotes matches nothing. Dropping the prefix sidesteps the quoting entirely.
+  printf '%s\n' "$NONEXH" | grep -F 'plugin type=' \
+    | sed 's/.*plugin type=/plugin type=/; s/[[:space:]]*$//' \
+    | sort | uniq -c | sort -rn | head -6 \
+    | cut -c1-150 | sed 's/^/          /'
+  info ""
+  info "the first such line in full, wrapped rather than cut:"
+  printf '%s\n' "$NONEXH" | head -1 | fold -w 108 -s | sed 's/^/          /'
 else
   info "no non-exhaustion CNI errors in the journal."
   info "The pool emptied through retries, not through a plugin fault."
@@ -76,10 +95,20 @@ sudo journalctl -u k3s --no-pager --since '6 hours ago' 2>/dev/null \
 
 log "3. Is istio-cni in the chain complaining?"
 if kubectl -n istio-system get ds/istio-cni-node >/dev/null 2>&1; then
-  E="$(kubectl -n istio-system logs ds/istio-cni-node --tail=300 2>/dev/null \
+  E="$(kubectl -n istio-system logs ds/istio-cni-node --tail=2000 2>/dev/null \
        | grep -iE 'error|fail|denied' | grep -v 'level=info' | head -8)"
-  if [ -n "$E" ]; then bad "istio-cni logged errors:"; echo "$E" | cut -c1-180 | sed 's/^/          /'
-  else ok "no errors in istio-cni-node logs"; fi
+  if [ -n "$E" ]; then
+    bad "istio-cni logged errors:"
+    echo "$E" | fold -w 108 -s | sed 's/^/          /'
+  else
+    ok "no errors in the istio-cni-node log buffer"
+    # Be precise about what this proves. It reads a bounded tail of a LIVE
+    # pod: an error hours old has scrolled off, and a pod restart loses the
+    # buffer entirely. A PASS here means "not failing now" and never "did not
+    # fail then". Section 2 reads the journal, which is persistent, and is the
+    # one to trust about the past.
+    info "(bounded tail of a live pod - says nothing about hours ago)"
+  fi
 else
   info "istio-cni-node not installed"
 fi
