@@ -25,6 +25,11 @@ output "tunnel_command" {
   EOT
   value = join(" ", [
     "ssh",
+    # Keepalives, not decoration. These installs print nothing for minutes and
+    # an idle session through a NAT gateway is closed - which kills helm
+    # mid-install and strands the release in `pending-install`.
+    "-o ServerAliveInterval=30",
+    "-o ServerAliveCountMax=6",
     "-L 8080:localhost:8080",
     "-L 2802:localhost:2802",
     "ubuntu@${aws_instance.node.public_ip}",

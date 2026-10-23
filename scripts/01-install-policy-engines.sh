@@ -30,6 +30,72 @@ source "$HERE/versions.env"
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 
 # ---------------------------------------------------------------------------
+# AN SSH DROP MID-HELM-INSTALL IS NOT A TRANSIENT ERROR.
+#
+# Helm keeps release state in a Secret in the release namespace. A helm
+# process killed partway through - an SSH `Broken pipe` is the usual way,
+# because these installs produce no output for minutes and an idle NAT or
+# firewall timeout closes the session - leaves that Secret in
+# `pending-install`, and NOTHING EVER CLEARS IT. The process that would have
+# is gone.
+#
+# The next run then reports:
+#
+#   Error: UPGRADE FAILED: another operation (install/upgrade/rollback) is
+#   in progress
+#
+# which reads like a concurrent install and invites waiting. There is nothing
+# to wait for. These two functions prevent it and then recover from it.
+# ---------------------------------------------------------------------------
+require_session() {
+  [[ -n "${TMUX:-}" || -n "${STY:-}" ]] && { ok "running inside tmux/screen"; return 0; }
+  [[ ! -t 0 ]] && return 0        # non-interactive (CI): nothing to prompt
+  warn "You are NOT inside tmux or screen."
+  warn "This script runs helm installs that take several minutes with no"
+  warn "output. If the SSH session drops, helm is killed mid-install and the"
+  warn "release is left in 'pending-install', which must be cleared before a"
+  warn "retry can work."
+  warn ""
+  warn "    tmux new -s zt        # then re-run this script"
+  warn "    # detach: ctrl-b then d      reattach: tmux attach -t zt"
+  warn ""
+  read -r -p "    Continue without tmux anyway? [y/N] " _a
+  [[ "${_a:-}" =~ ^[Yy]$ ]] || die "Stopped. Start tmux and re-run - it costs 5 seconds."
+}
+
+clear_stuck_release() {
+  local rel="$1" ns="$2" st
+  st="$(helm status "$rel" -n "$ns" -o json 2>/dev/null | jq -r '.info.status' 2>/dev/null || true)"
+  case "$st" in
+    pending-install)
+      warn "helm release $rel/$ns is stuck in 'pending-install' - no process owns it."
+      # There is no previous revision to roll back TO on a first install, so
+      # `helm rollback` cannot work here; uninstall is the only correct move
+      # and it takes the partially-created resources with it.
+      helm uninstall "$rel" -n "$ns" --wait --timeout 5m 2>&1 | sed 's/^/      /' || true
+      ok "cleared - reinstalling from scratch"
+      ;;
+    pending-upgrade|pending-rollback)
+      warn "helm release $rel/$ns is stuck in '$st' - rolling back."
+      helm rollback "$rel" -n "$ns" --wait --timeout 5m 2>&1 | sed 's/^/      /' \
+        || { warn "rollback failed; uninstalling instead"
+             helm uninstall "$rel" -n "$ns" --wait --timeout 5m 2>&1 | sed 's/^/      /' || true; }
+      ok "cleared"
+      ;;
+    uninstalling)
+      warn "helm release $rel/$ns is stuck in 'uninstalling' - forcing removal."
+      helm uninstall "$rel" -n "$ns" --no-hooks --timeout 5m 2>&1 | sed 's/^/      /' || true
+      ;;
+    deployed)  ok "helm release $rel/$ns already deployed - upgrading in place" ;;
+    failed)    warn "helm release $rel/$ns is in 'failed' - upgrade will retry over it" ;;
+    "")        : ;;   # not installed; normal first run
+    *)         warn "helm release $rel/$ns is in unexpected state '$st'" ;;
+  esac
+}
+
+require_session
+
+# ---------------------------------------------------------------------------
 # A pin that does not exist must FAIL, not fall back to latest.
 #
 # `helm install --version X` on a missing version errors, which is correct. The
@@ -60,6 +126,7 @@ require_chart falcosecurity falco "$FALCO_CHART_VERSION"
 
 # ===========================================================================
 log "Installing Kyverno ${KYVERNO_CHART_VERSION}"
+clear_stuck_release kyverno kyverno
 # ===========================================================================
 helm upgrade --install kyverno kyverno/kyverno \
   --namespace kyverno --create-namespace \
@@ -108,6 +175,7 @@ kubectl -n kyverno get pods
 
 # ===========================================================================
 log "Installing Falco ${FALCO_CHART_VERSION}"
+clear_stuck_release falco falco
 # ===========================================================================
 
 # The kernel prerequisites for the modern_ebpf driver, checked BEFORE the

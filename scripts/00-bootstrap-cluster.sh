@@ -22,7 +22,12 @@ source "$HERE/versions.env"
 
 log "Base packages"
 sudo apt-get update -qq
-sudo apt-get install -y -qq curl git jq apt-transport-https
+# tmux is not optional comfort. 01 and 02 run helm installs that print
+# nothing for minutes, and an idle SSH session through a NAT gateway gets
+# closed - which kills helm mid-install and leaves the release stuck in
+# `pending-install`. Both scripts refuse to start outside tmux for that
+# reason, so install it here while we are already root.
+sudo apt-get install -y -qq curl git jq apt-transport-https tmux
 
 log "Installing k3s ${K3S_CHANNEL:-stable}"
 # --disable traefik: Istio's ingress gateway is the entry point, and two

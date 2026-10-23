@@ -18,6 +18,33 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$HERE/versions.env"
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 
+# ---------------------------------------------------------------------------
+# DO NOT RUN THIS IN A BARE SSH SESSION.
+#
+# Everything below produces no output for minutes at a time - the ArgoCD
+# server-side apply, then three rollout waits - and an idle session through a
+# NAT gateway gets closed. Unlike helm, `kubectl apply` leaves no lock behind,
+# so the cost here is only a half-applied install and a confusing re-run
+# rather than a stuck release. tmux removes the whole class of problem.
+# ---------------------------------------------------------------------------
+require_session() {
+  [[ -n "${TMUX:-}" || -n "${STY:-}" ]] && { ok "running inside tmux/screen"; return 0; }
+  [[ ! -t 0 ]] && return 0        # non-interactive (CI): nothing to prompt
+  warn "You are NOT inside tmux or screen."
+  warn "This script runs helm installs that take several minutes with no"
+  warn "output. If the SSH session drops, helm is killed mid-install and the"
+  warn "release is left in 'pending-install', which must be cleared before a"
+  warn "retry can work."
+  warn ""
+  warn "    tmux new -s zt        # then re-run this script"
+  warn "    # detach: ctrl-b then d      reattach: tmux attach -t zt"
+  warn ""
+  read -r -p "    Continue without tmux anyway? [y/N] " _a
+  [[ "${_a:-}" =~ ^[Yy]$ ]] || die "Stopped. Start tmux and re-run - it costs 5 seconds."
+}
+
+require_session
+
 log "Creating the argocd namespace"
 kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
 
