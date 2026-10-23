@@ -314,9 +314,31 @@ repository rather than by running it.
 |---|---|---|---|
 | 1 | **Falco values written against the chart 4.x schema.** `collectors.containerd.socket` does not exist in chart 9.x; the setting is now a *list* at `collectors.containerEngine.engines.cri.sockets`. | The chart ships **no `values.schema.json`**, so Helm accepted the unknown key silently — no warning, exit 0. The install would have succeeded, Falco would have run, and the setting would have had no effect. Found by rendering the chart and reading the output, not by reading either file: both looked correct. | **Fixed.** Chart 9.x's default list already contains the k3s path, so the symptom would not have appeared on this version — on any other it would have been `k8s.ns.name=<NA>` on every event and five silently inert rules. |
 | 2 | **`kyverno.io/v1 ClusterPolicy` is deprecated** as of Kyverno 1.19, which directs users to `ImageValidatingPolicy` instead. | A warning on every `kyverno test` run. The policies were verified working on 1.19.1 regardless: 24/24 unit tests passed, and policy 01 reached ghcr.io and correctly refused an unsigned digest. | **Pinned, not worked around.** An unpinned install would eventually stop enforcing on a cluster whose manifests had not changed — and `kubectl get clusterpolicy` would still list all five. The migration path is named in `versions.env`. |
-| 3 | | | |
-| 4 | | | |
-| 5 | | | |
+| 3 | **`starlette` was never pinned — it was whatever `fastapi`'s range resolved to.** `fastapi==0.115.6` requires `starlette>=0.40.0,<0.42.0`, so both images shipped starlette 0.41.3 carrying three HIGH CVEs with fixes published: CVE-2025-62727 (DoS via Range header merging, fixed 0.49.1), CVE-2026-48818 (SSRF + NTLM credential theft via UNC paths, fixed 1.1.0), CVE-2026-54283 (`form()` limits silently ignored → DoS, fixed 1.3.1). | **The very first CI run failed, on both matrix legs, at the Trivy step** — run `38856367641`, identical fast failures across the matrix, which on the GitOps platform was the heuristic for *configuration, not code*. Here it meant neither. Both legs failed for the same reason because both inherit the same dependency. **The Debian layer scanned clean: 0 findings. Every finding was in a Python package.** | **Fixed** in `149e4ea` — `fastapi==0.143.2`, `starlette==1.8.0`, `uvicorn[standard]==0.54.0`, and starlette now **named explicitly** in both requirements files. fastapi 0.143.2 only asks for `starlette>=0.46.0`, and a floor is not a pin: left alone the image resolves differently each month with nothing in git changing. Verified rather than assumed — 0.41→1.8 crosses a major version, so both services were run on the exact set and every endpoint exercised. |
+| 4 | **My own runbook stripped the executable bit off terraform's provider binaries.** BUILD-STEPS step 1 normalises permissions with `find . -type f -exec chmod 644 {} +`, which is correct for a fresh copy and wrong the moment `.terraform/` already exists from an earlier `terraform init`. | `terraform validate` failed with `fork/exec .terraform/providers/.../terraform-provider-aws_v5.100.0_x5: permission denied`, on a directory that had worked six days earlier. The message names terraform, so it reads as a corrupted plugin cache; the operator's first hypothesis was that the cache had gone stale with age. **`stat` settled it: mtime 2026-10-16 (the download), ctime 2026-10-22 (today). ctime changes on `chmod` and mtime does not.** The other tell was that 19 of 19 shell scripts were still executable - exactly what `chmod 644` followed by `chmod +x scripts/*.sh` produces. | **Fixed in the runbook, not just on the box.** All four copies of the normalisation step now prune `.terraform` and `.git`. Recovery needs no re-init: `chmod +x $(find . -path '*/.terraform/providers/*' -name 'terraform-provider-*')`. Verified with a reproduction that asserts the old command breaks both the provider and a git hook, and the new one breaks neither. |
+| 5 | **`kubectl wait --all` does not wait for a resource to *exist*.** `00-bootstrap-cluster.sh` ran `kubectl wait --for=condition=Ready node --all --timeout=180s` immediately after the k3s installer returned. k3s registers its node a few seconds *after* systemd reports the service started, so in that window `--all` resolves to an empty set — and kubectl treats waiting on nothing as a usage error rather than a condition to wait for. | **`error: no matching resources found`, and nothing else.** Under `set -euo pipefail` the script died there, on the first run on a fresh box, having installed k3s but *not* helm, istioctl, cosign or Istio. The message names no resource, no condition and no timeout, so it reads like a kubeconfig or RBAC fault — the `--timeout=180s` on the line actively misleads, because it implies the command waited and gave up when in fact it never waited at all. Nothing in the output said which of the script's 200 lines had failed. | **Fixed in `9297d18`** — poll until `kubectl get nodes` returns a row, *then* wait on the condition, and `die` with a `journalctl -u k3s` pointer if no node appears in 120s. Verified with a stub `kubectl` that returns no nodes for its first three calls: the old form exits 1, the new form waits and succeeds. **The general lesson is worth more than the fix: `wait --all` and `wait <name>` both fail fast on a missing resource, so every `kubectl wait` that can race its own creation needs an existence check in front of it.** |
+| 6 | | | |
+
+**Defect 3 is the one worth arguing about**, because the tempting fix was the
+wrong one. The gate failed, and the fastest way to green was to loosen it —
+add `|| true`, or drop to CRITICAL only, or extend `--ignore-unfixed` into
+ignoring everything. `build-sign.yml` predicts that reaction in a comment
+written before the first run: *"a gate nobody can satisfy is a gate nobody
+keeps."*
+
+But this gate **was** satisfiable. `--ignore-unfixed` already suppresses the
+unfixable base-image noise that makes security gates unkeepable; what got
+through it was three findings that each named a fixed version. That is the
+narrow set the gate exists for, and the correct response to it is a dependency
+bump, which took one commit.
+
+**The deeper repository defect is not the stale version — it is that nothing
+in this repo chose it.** A supply-chain project that signs digests rather than
+tags, on the grounds that a tag is a mutable pointer somebody else can move,
+had its most exposed dependency selected by a range in a third party's
+metadata. The signature was always going to be valid; it would simply have
+been a valid signature over a vulnerable image, which is precisely the
+failure mode the project argues scanning alone cannot catch.
 
 ### Expected traps, and whether they were hit
 
@@ -335,7 +357,7 @@ make the list look better than the engineering was.
 | Default-deny severs the sidecar from istiod | `network/03-allow-istio-control-plane.yaml` | ⬜ |
 | Kyverno webhook times out reaching Sigstore | `policies/kyverno/01-verify-image-signature.yaml` | ⬜ |
 | Sync waves do not hold under validation failure | `workloads/kustomization.yaml` | ⬜ |
-| Trivy gate fails on unfixable base-image CVEs | `build-sign.yml` | ⬜ |
+| Trivy gate fails on unfixable base-image CVEs | `build-sign.yml` | ❌ **No — and the near miss is the interesting part.** The gate did fail the first build, but on the opposite thing to the prediction. `python:3.12-slim` (Debian 13.7, 87 packages) scanned **completely clean**; `--ignore-unfixed` suppressed nothing because there was nothing unfixable to suppress. All three findings were **fixable**, and in an application dependency. The prediction was right that the gate would fire and wrong about why — see defect 3. |
 | GHCR package private → Kyverno cannot fetch the signature | `supply-chain-app/README.md` | ⬜ |
 
 ---
